@@ -41,3 +41,4 @@ logs/*.log.*
 .vscode/
 *.swp
 *.swo
+data/
