@@ -1,0 +1,43 @@
+# ── Secrets & Environment ──────────────────────────────────────────────────────
+.env
+
+# ── Python ─────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+
+# ── Virtual Environment ────────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+
+# ── Generated Reports (PDF/Excel) ──────────────────────────────────────────────
+reports/*.pdf
+reports/*.xlsx
+reports/*.xls
+
+# ── Logs ───────────────────────────────────────────────────────────────────────
+logs/*.log
+logs/*.log.*
+
+# ── SQLite databases ───────────────────────────────────────────────────────────
+# users.db is managed manually on the server — do NOT auto-commit it
+# (it may be checked in intentionally to seed user accounts — remove
+#  this line only if you want to track it in git)
+# config/users.db
+
+# ── macOS ──────────────────────────────────────────────────────────────────────
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# ── IDEs ───────────────────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo

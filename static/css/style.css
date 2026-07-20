@@ -1,0 +1,84 @@
+/* ─────────────────────────────────────────────────────────────────────────────
+   RSSS — Rwanda Stunting Surveillance System
+   ───────────────────────────────────────────────────────────────────────────── */
+
+*, *::before, *::after { box-sizing: border-box; }
+
+body {
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  font-size: 14px;
+  color: #2C3E50;
+  background: #F0F2F5;
+  margin: 0;
+}
+
+/* ── Sidebar links ───────────────────────────────────────────────────────── */
+.sidebar-link { color: #B8C5D6; border-radius: 6px; font-size: 0.875rem;
+                padding: 8px 12px; margin-bottom: 2px; font-weight: 500;
+                display: block; text-decoration: none; }
+.sidebar-link:hover  { background: rgba(255,255,255,0.08) !important; color: #FFFFFF !important; }
+.sidebar-link.active { background: #2E4A7A !important; color: #FFFFFF !important; font-weight: 600 !important; }
+
+/* ── KPI cards ───────────────────────────────────────────────────────────── */
+.kpi-card { border: none; border-radius: 10px; box-shadow: 0 1px 4px rgba(0,0,0,.1);
+             transition: box-shadow .2s; }
+.kpi-card:hover { box-shadow: 0 3px 10px rgba(0,0,0,.15); }
+.kpi-value  { font-size: 1.6rem; font-weight: 700; color: #1a1a2e; }
+.kpi-label  { font-size: .72rem; text-transform: uppercase; letter-spacing: .05em; color: #6c757d; }
+
+/* ── Chart containers ────────────────────────────────────────────────────── */
+.chart-card  { background: #FFFFFF; border-radius: 8px;
+               box-shadow: 0 1px 4px rgba(0,0,0,.07); padding: 8px; }
+.chart-wrap  { background: #fff; border-radius: 8px;
+               box-shadow: 0 1px 3px rgba(0,0,0,.08); padding: 8px; }
+
+/* ── Dropdowns ───────────────────────────────────────────────────────────── */
+.Select-control   { border-radius: 6px !important; border-color: #dee2e6 !important;
+                    font-size: 0.82rem !important; }
+.Select-menu-outer{ border-radius: 0 0 6px 6px !important; border-color: #dee2e6 !important;
+                    z-index: 9999 !important; }
+
+/* ── Tabs ────────────────────────────────────────────────────────────────── */
+.nav-tabs .nav-link          { font-size: 0.83rem; font-weight: 500; color: #5D6D7E;
+                               border: none; border-bottom: 2px solid transparent; padding: 6px 14px; }
+.nav-tabs .nav-link.active   { color: #C0392B; border-bottom: 2px solid #C0392B;
+                               background: transparent; font-weight: 600; }
+.nav-tabs .nav-link:hover    { color: #C0392B; border-bottom: 2px solid #FADBD8; }
+
+/* ── Buttons ─────────────────────────────────────────────────────────────── */
+.btn-danger          { background-color: #C0392B !important; border-color: #C0392B !important; }
+.btn-danger:hover    { background-color: #A93226 !important; border-color: #A93226 !important; }
+.btn-outline-secondary { font-size: 0.78rem !important; }
+.btn-xs              { padding: .15rem .5rem; font-size: .75rem; border-radius: 4px; }
+
+/* ── Progress ────────────────────────────────────────────────────────────── */
+.progress { border-radius: 8px; }
+
+/* ── Login ───────────────────────────────────────────────────────────────── */
+.login-bg { min-height: 100vh;
+            background: linear-gradient(135deg, #1a1a2e 0%, #c0392b 100%);
+            display: flex; align-items: center; justify-content: center; }
+.login-card { border: none; border-radius: 14px; box-shadow: 0 8px 32px rgba(0,0,0,.3); }
+#login-user, #login-pass { font-size: 0.9rem; border-radius: 6px; }
+
+/* ── Cards ───────────────────────────────────────────────────────────────── */
+.card { border-radius: 8px !important; }
+
+/* ── Tables ──────────────────────────────────────────────────────────────── */
+.tab-content { min-height: 240px; }
+.table-sm td, .table-sm th { font-size: 0.8rem; padding: 6px 10px; vertical-align: middle; }
+.table-hover tbody tr:hover { background: #FEF9F9; }
+
+/* ── Follow-up list ──────────────────────────────────────────────────────── */
+#fu-children-list button:hover { background: #FADBD8 !important; border-color: #C0392B !important; }
+
+/* ── Alerts ──────────────────────────────────────────────────────────────── */
+.alert { border-radius: 6px; font-size: 0.83rem; }
+
+/* ── Scrollbar ───────────────────────────────────────────────────────────── */
+::-webkit-scrollbar       { width: 5px; height: 5px; }
+::-webkit-scrollbar-thumb { background: #BDC3C7; border-radius: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+
+/* ── Toast ───────────────────────────────────────────────────────────────── */
+#toast-container { z-index: 1090; }

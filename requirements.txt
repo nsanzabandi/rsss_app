@@ -1,0 +1,14 @@
+dash>=2.17.0
+dash-bootstrap-components>=1.6.0
+plotly>=5.20.0
+pandas>=2.0.0
+numpy>=1.26.0
+python-dateutil>=2.9.0
+psycopg2-binary>=2.9.9
+fpdf2>=2.7.6
+openpyxl>=3.1.0
+matplotlib>=3.8.0
+gunicorn>=21.2.0
+gevent>=24.2.1
+python-dotenv>=1.0.0
+Pillow>=10.0.0

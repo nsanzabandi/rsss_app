@@ -1,0 +1,670 @@
+{
+  "hospitals": [
+    {
+      "hospital_name": "Kibagabaga Sub District",
+      "district": "Gasabo",
+      "hospital_email": "kibagabaga.hospital@moh.gov.rw",
+      "hospital_contact_person": "DG",
+      "nutrition_coordinator_email": "regis.mudaheranwa@gasabo.gov.rw",
+      "nutrition_coordinator_name": "VM",
+      "district_health_officers": [],
+      "phone": "",
+      "active": true
+    },
+    {
+      "hospital_name": "Nyamata Sub District",
+      "district": "Bugesera",
+      "hospital_email": "nyamata.hospital@moh.gov.rw",
+      "hospital_contact_person": "DG",
+      "nutrition_coordinator_email": "vmasoc@bugesera.gov.rw",
+      "nutrition_coordinator_name": "VM",
+      "district_health_officers": [
+        {
+          "name": "KEMIREMBE Ruth",
+          "email": "ruth.kemirembe@bugesera.gov.rw",
+          "role": "District Health Officer"
+        }
+      ],
+      "phone": "",
+      "active": true
+    },
+    {
+      "hospital_name": "Masaka Sub District",
+      "district": "Kicukiro",
+      "hospital_email": "masaka.hospital@moh.gov.rw",
+      "hospital_contact_person": "DG",
+      "nutrition_coordinator_email": "m.huss@kicukiro.gov.rw",
+      "nutrition_coordinator_name": "VM",
+      "district_health_officers": [],
+      "phone": "",
+      "active": true
+    },
+    {
+      "hospital_name": "Nyarugenge Sub District",
+      "district": "Nyarugenge",
+      "hospital_email": "nyarugenge.hospital@moh.gov.rw",
+      "hospital_contact_person": "DG",
+      "nutrition_coordinator_email": "ddea@nyarugenge.gov.rw",
+      "nutrition_coordinator_name": "VM",
+      "district_health_officers": [],
+      "phone": "",
+      "active": true
+    },
+    {
+      "hospital_name": "Muhima Sub District",
+      "district": "Nyarugenge",
+      "hospital_email": "muhima.hospital@moh.gov.rw",
+      "hospital_contact_person": "DG",
+      "nutrition_coordinator_email": "ddea@nyarugenge.gov.rw",
+      "nutrition_coordinator_name": "VM",
+      "district_health_officers": [],
+      "phone": "",
+      "active": true
+    },
+    {
+      "hospital_name": "Kinihira Sub District",
+      "district": "Rulindo",
+      "hospital_email": "kinihira.hospital@moh.gov.rw",
+      "hospital_contact_person": "DG",
+      "nutrition_coordinator_email": "tmutaganda@rulindo.gov.rw",
+      "nutrition_coordinator_name": "VM",
+      "district_health_officers": [],
+      "phone": "",
+      "active": true
+    },
+    {
+      "hospital_name": "Rutongo Sub District",
+      "district": "Rulindo",
+      "hospital_email": "rutongo.hospital@moh.gov.rw",
+      "hospital_contact_person": "DG",
+      "nutrition_coordinator_email": "tmutaganda@rulindo.gov.rw",
+      "nutrition_coordinator_name": "VM",
+      "district_health_officers": [],
+      "phone": "",
+      "active": true
+    },
+    {
+      "hospital_name": "Murunda Sub District",
+      "district": "Rutsiro",
+      "hospital_email": "murunda.hospital@moh.gov.rw",
+      "hospital_contact_person": "DG",
+      "nutrition_coordinator_email": "vicemayorsa@rutsiro.gov.rw",
+      "nutrition_coordinator_name": "VM",
+      "district_health_officers": [],
+      "phone": "",
+      "active": true
+    },
+    {
+      "hospital_name": "Gahini Sub District",
+      "district": "Kayonza",
+      "hospital_email": "gahini.hospital@moh.gov.rw",
+      "hospital_contact_person": "DG",
+      "nutrition_coordinator_email": "asoc@kayonza.gov.rw",
+      "nutrition_coordinator_name": "VM",
+      "district_health_officers": [
+        {
+          "name": "NIYIBIZI Emmanuel",
+          "email": "niyemma7@gmail.com",
+          "role": "District Health Officer"
+        },
+        {
+          "name": "Ngarambe Alphonse",
+          "email": "alphonse.ngarambe@kayonza.gov.rw",
+          "role": "District Health Officer"
+        }
+      ],
+      "phone": "",
+      "active": true
+    },
+    {
+      "hospital_name": "Kibungo Sub District",
+      "district": "Ngoma",
+      "hospital_email": "kibungo.hospital@moh.gov.rw",
+      "hospital_contact_person": "DG",
+      "nutrition_coordinator_email": "gmukayiranga@ngoma.gov.rw",
+      "nutrition_coordinator_name": "VM",
+      "district_health_officers": [],
+      "phone": "",
+      "active": true
+    },
+    {
+      "hospital_name": "Kirehe Sub District",
+      "district": "Kirehe",
+      "hospital_email": "kirehe.hospital@moh.gov.rw",
+      "hospital_contact_person": "DG",
+      "nutrition_coordinator_email": "jmukandayisenga@kirehe.gov.rw",
+      "nutrition_coordinator_name": "VM",
+      "district_health_officers": [
+        {
+          "name": "NDIZEYE Chrispin",
+          "email": "ndicris@gmail.com",
+          "role": "District Health Officer"
+        },
+        {
+          "name": "NTIRENGANYA Theogene",
+          "email": "health@kirehe.gov.rw",
+          "role": "District Health Officer"
+        }
+      ],
+      "phone": "",
+      "active": true
+    },
+    {
+      "hospital_name": "Gatunda Sub District",
+      "district": "Nyagatare",
+      "hospital_email": "gatunda.hospital@moh.gov.rw",
+      "hospital_contact_person": "DG",
+      "nutrition_coordinator_email": "info@nyagatare.gov.rw",
+      "nutrition_coordinator_name": "VM",
+      "district_health_officers": [],
+      "phone": "",
+      "active": true
+    },
+    {
+      "hospital_name": "Nyagatare Sub District",
+      "district": "Nyagatare",
+      "hospital_email": "nyagatare.hospital@moh.gov.rw",
+      "hospital_contact_person": "DG",
+      "nutrition_coordinator_email": "info@nyagatare.gov.rw",
+      "nutrition_coordinator_name": "VM",
+      "district_health_officers": [],
+      "phone": "",
+      "active": true
+    },
+    {
+      "hospital_name": "Rwinkwavu Sub District",
+      "district": "Kayonza",
+      "hospital_email": "rwinkwavu.hospital@moh.gov.rw",
+      "hospital_contact_person": "DG",
+      "nutrition_coordinator_email": "asoc@kayonza.gov.rw",
+      "nutrition_coordinator_name": "VM",
+      "district_health_officers": [
+        {
+          "name": "NIYIBIZI Emmanuel",
+          "email": "niyemma7@gmail.com",
+          "role": "District Health Officer"
+        },
+        {
+          "name": "Ngarambe Alphonse",
+          "email": "alphonse.ngarambe@kayonza.gov.rw",
+          "role": "District Health Officer"
+        }
+      ],
+      "phone": "",
+      "active": true
+    },
+    {
+      "hospital_name": "Butaro Sub District",
+      "district": "Burera",
+      "hospital_email": "butaro.hospital@moh.gov.rw",
+      "hospital_contact_person": "DG",
+      "nutrition_coordinator_email": "vmsocial@burera.gov.rw",
+      "nutrition_coordinator_name": "VM",
+      "district_health_officers": [],
+      "phone": "",
+      "active": true
+    },
+    {
+      "hospital_name": "Byumba Sub District",
+      "district": "Gicumbi",
+      "hospital_email": "byumba.hospital@moh.gov.rw",
+      "hospital_contact_person": "DG",
+      "nutrition_coordinator_email": "mayor@gicumbi.gov.rw",
+      "nutrition_coordinator_name": "VM",
+      "district_health_officers": [],
+      "phone": "",
+      "active": true
+    },
+    {
+      "hospital_name": "Nemba Sub District",
+      "district": "Gakenke",
+      "hospital_email": "nemba.hospital@moh.gov.rw",
+      "hospital_contact_person": "DG",
+      "nutrition_coordinator_email": "uwamatherese@gmail.com",
+      "nutrition_coordinator_name": "VM",
+      "district_health_officers": [
+        {
+          "name": "Therogene Hategeka",
+          "email": "theogenehategeka@gmail.com",
+          "role": "Health Promotion Officer"
+        }
+      ],
+      "phone": "",
+      "active": true
+    },
+    {
+      "hospital_name": "Kiziguro Sub District",
+      "district": "Gatsibo",
+      "hospital_email": "kiziguro.hospital@moh.gov.rw",
+      "hospital_contact_person": "DG",
+      "nutrition_coordinator_email": "asoc@gatsibo.gov.rw",
+      "nutrition_coordinator_name": "VM",
+      "district_health_officers": [],
+      "phone": "",
+      "active": true
+    },
+    {
+      "hospital_name": "Ngarama Sub District",
+      "district": "Gatsibo",
+      "hospital_email": "ngarama.hospital@moh.gov.rw",
+      "hospital_contact_person": "DG",
+      "nutrition_coordinator_email": "asoc@gatsibo.gov.rw",
+      "nutrition_coordinator_name": "VM",
+      "district_health_officers": [],
+      "phone": "",
+      "active": true
+    },
+    {
+      "hospital_name": "Gatonde Sub District",
+      "district": "Gakenke",
+      "hospital_email": "gatonde.hospital@moh.gov.rw",
+      "hospital_contact_person": "DG",
+      "nutrition_coordinator_email": "uwamatherese@gmail.com",
+      "nutrition_coordinator_name": "VM",
+      "district_health_officers": [
+        {
+          "name": "Therogene Hategeka",
+          "email": "theogenehategeka@gmail.com",
+          "role": "Health Promotion Officer"
+        }
+      ],
+      "phone": "",
+      "active": true
+    },
+    {
+      "hospital_name": "Ruli Sub District",
+      "district": "Gakenke",
+      "hospital_email": "ruli.hospital@moh.gov.rw",
+      "hospital_contact_person": "DG",
+      "nutrition_coordinator_email": "uwamatherese@gmail.com",
+      "nutrition_coordinator_name": "VM",
+      "district_health_officers": [
+        {
+          "name": "Therogene Hategeka",
+          "email": "theogenehategeka@gmail.com",
+          "role": "Health Promotion Officer"
+        }
+      ],
+      "phone": "",
+      "active": true
+    },
+    {
+      "hospital_name": "Ruhengeri Sub District",
+      "district": "Musanze",
+      "hospital_email": "ruhengeri.hospital@moh.gov.rw",
+      "hospital_contact_person": "DG",
+      "nutrition_coordinator_email": "asoc@musanze.gov.rw",
+      "nutrition_coordinator_name": "VM",
+      "district_health_officers": [
+        {
+          "name": "BASHIRIJABO Jean Bosco",
+          "email": "health.promotion@musanze.gov.rw",
+          "role": "Health Promotion Officer"
+        }
+      ],
+      "phone": "",
+      "active": true
+    },
+    {
+      "hospital_name": "Shyira Sub District",
+      "district": "Nyabihu",
+      "hospital_email": "shyira.hospital@moh.gov.rw",
+      "hospital_contact_person": "DG",
+      "nutrition_coordinator_email": "vmasoc@nyabihu.gov.rw",
+      "nutrition_coordinator_name": "VM",
+      "district_health_officers": [
+        {
+          "name": "SAFARI Alexandre",
+          "email": "alexandresafros@gmail.com",
+          "role": "District Health Officer"
+        }
+      ],
+      "phone": "",
+      "active": true
+    },
+    {
+      "hospital_name": "Kabutare Sub District",
+      "district": "Huye",
+      "hospital_email": "kabutare.hospital@moh.gov.rw",
+      "hospital_contact_person": "DG",
+      "nutrition_coordinator_email": "vmsocial@huye.gov.rw",
+      "nutrition_coordinator_name": "VM",
+      "district_health_officers": [],
+      "phone": "",
+      "active": true
+    },
+    {
+      "hospital_name": "Gitwe Sub District",
+      "district": "Ruhango",
+      "hospital_email": "gitwe.hospital@moh.gov.rw",
+      "hospital_contact_person": "DG",
+      "nutrition_coordinator_email": "vmsocial@ruhango.gov.rw",
+      "nutrition_coordinator_name": "VM",
+      "district_health_officers": [],
+      "phone": "",
+      "active": true
+    },
+    {
+      "hospital_name": "Ruhango Sub District",
+      "district": "Ruhango",
+      "hospital_email": "ruhango.hospital@moh.gov.rw",
+      "hospital_contact_person": "DG",
+      "nutrition_coordinator_email": "vmsocial@ruhango.gov.rw",
+      "nutrition_coordinator_name": "VM",
+      "district_health_officers": [],
+      "phone": "",
+      "active": true
+    },
+    {
+      "hospital_name": "Gakoma Sub District",
+      "district": "Gisagara",
+      "hospital_email": "gakoma.hospital@moh.gov.rw",
+      "hospital_contact_person": "DG",
+      "nutrition_coordinator_email": "vmafso@gisagara.gov.rw",
+      "nutrition_coordinator_name": "VM",
+      "district_health_officers": [
+        {
+          "name": "KALINIJABO K. Jackson",
+          "email": "dirhealth@gisagara.gov.rw",
+          "role": "Director of Health"
+        }
+      ],
+      "phone": "",
+      "active": true
+    },
+    {
+      "hospital_name": "Kibilizi Sub District",
+      "district": "Gisagara",
+      "hospital_email": "kibilizi.hospital@moh.gov.rw",
+      "hospital_contact_person": "DG",
+      "nutrition_coordinator_email": "vmafso@gisagara.gov.rw",
+      "nutrition_coordinator_name": "VM",
+      "district_health_officers": [
+        {
+          "name": "KALINIJABO K. Jackson",
+          "email": "dirhealth@gisagara.gov.rw",
+          "role": "Director of Health"
+        }
+      ],
+      "phone": "",
+      "active": true
+    },
+    {
+      "hospital_name": "Kaduha Sub District",
+      "district": "Nyamagabe",
+      "hospital_email": "kaduha.hospital@moh.gov.rw",
+      "hospital_contact_person": "DG",
+      "nutrition_coordinator_email": "info@nyamagabe.gov.rw",
+      "nutrition_coordinator_name": "VM",
+      "district_health_officers": [],
+      "phone": "",
+      "active": true
+    },
+    {
+      "hospital_name": "Kigeme Sub District",
+      "district": "Nyamagabe",
+      "hospital_email": "kigeme.hospital@moh.gov.rw",
+      "hospital_contact_person": "DG",
+      "nutrition_coordinator_email": "info@nyamagabe.gov.rw",
+      "nutrition_coordinator_name": "VM",
+      "district_health_officers": [],
+      "phone": "",
+      "active": true
+    },
+    {
+      "hospital_name": "Nyanza Sub District",
+      "district": "Nyanza",
+      "hospital_email": "nyanza.hospital@moh.gov.rw",
+      "hospital_contact_person": "DG",
+      "nutrition_coordinator_email": "vm.asoc@nyanza.gov.rw",
+      "nutrition_coordinator_name": "VM",
+      "district_health_officers": [
+        {
+          "name": "Kabera Clement",
+          "email": "dirhealth@nyanza.gov.rw",
+          "role": "Director of Health"
+        }
+      ],
+      "phone": "",
+      "active": true
+    },
+    {
+      "hospital_name": "Munini Sub District",
+      "district": "Nyaruguru",
+      "hospital_email": "munini.hospital@moh.gov.rw",
+      "hospital_contact_person": "DG",
+      "nutrition_coordinator_email": "info@nyaruguru.gov.rw",
+      "nutrition_coordinator_name": "VM",
+      "district_health_officers": [
+        {
+          "name": "NSHIMIYIMANA Jean Claude",
+          "email": "claude.nshimiye22@gmail.com",
+          "role": "District Health Officer"
+        }
+      ],
+      "phone": "",
+      "active": true
+    },
+    {
+      "hospital_name": "Gisenyi Sub District",
+      "district": "Rubavu",
+      "hospital_email": "gisenyi.hospital@moh.gov.rw",
+      "hospital_contact_person": "DG",
+      "nutrition_coordinator_email": "vmasoc@rubavu.gov.rw",
+      "nutrition_coordinator_name": "VM",
+      "district_health_officers": [],
+      "phone": "",
+      "active": true
+    },
+    {
+      "hospital_name": "Kabgayi Sub District",
+      "district": "Muhanga",
+      "hospital_email": "kabgayi.hospital@moh.gov.rw",
+      "hospital_contact_person": "DG",
+      "nutrition_coordinator_email": "gilbert.mugabo@muhanga.gov.rw",
+      "nutrition_coordinator_name": "VM",
+      "district_health_officers": [
+        {
+          "name": "UMUTONIWASE KAMANA Sosthène",
+          "email": "sosthene.kamana@muhanga.gov.rw",
+          "role": "District Health Officer"
+        }
+      ],
+      "phone": "",
+      "active": true
+    },
+    {
+      "hospital_name": "Nyabikenke Sub District",
+      "district": "Muhanga",
+      "hospital_email": "nyabikenke.hospital@moh.gov.rw",
+      "hospital_contact_person": "DG",
+      "nutrition_coordinator_email": "gilbert.mugabo@muhanga.gov.rw",
+      "nutrition_coordinator_name": "VM",
+      "district_health_officers": [
+        {
+          "name": "UMUTONIWASE KAMANA Sosthène",
+          "email": "sosthene.kamana@muhanga.gov.rw",
+          "role": "District Health Officer"
+        }
+      ],
+      "phone": "",
+      "active": true
+    },
+    {
+      "hospital_name": "Kabaya Sub District",
+      "district": "Ngororero",
+      "hospital_email": "kabaya.hospital@moh.gov.rw",
+      "hospital_contact_person": "DG",
+      "nutrition_coordinator_email": "mukunduhirwe.benjamine@ngororero.gov.rw",
+      "nutrition_coordinator_name": "VM",
+      "district_health_officers": [
+        {
+          "name": "NYIRIMPUHWE JEAN",
+          "email": "jeandamour.nyirimpuhwe@ngororero.gov.rw",
+          "role": "District Health Officer"
+        }
+      ],
+      "phone": "",
+      "active": true
+    },
+    {
+      "hospital_name": "Muhororo Sub District",
+      "district": "Ngororero",
+      "hospital_email": "muhororo.hospital@moh.gov.rw",
+      "hospital_contact_person": "DG",
+      "nutrition_coordinator_email": "mukunduhirwe.benjamine@ngororero.gov.rw",
+      "nutrition_coordinator_name": "VM",
+      "district_health_officers": [
+        {
+          "name": "NYIRIMPUHWE JEAN",
+          "email": "jeandamour.nyirimpuhwe@ngororero.gov.rw",
+          "role": "District Health Officer"
+        }
+      ],
+      "phone": "",
+      "active": true
+    },
+    {
+      "hospital_name": "Kibuye Sub District",
+      "district": "Karongi",
+      "hospital_email": "kibuye.hospital@moh.gov.rw",
+      "hospital_contact_person": "DG",
+      "nutrition_coordinator_email": "info@karongi.gov.rw",
+      "nutrition_coordinator_name": "VM",
+      "district_health_officers": [],
+      "phone": "",
+      "active": true
+    },
+    {
+      "hospital_name": "Mugonero Sub District",
+      "district": "Karongi",
+      "hospital_email": "mugonero.hospital@moh.gov.rw",
+      "hospital_contact_person": "DG",
+      "nutrition_coordinator_email": "info@karongi.gov.rw",
+      "nutrition_coordinator_name": "VM",
+      "district_health_officers": [],
+      "phone": "",
+      "active": true
+    },
+    {
+      "hospital_name": "Kirinda Sub District",
+      "district": "Karongi",
+      "hospital_email": "kirinda.hospital@moh.gov.rw",
+      "hospital_contact_person": "DG",
+      "nutrition_coordinator_email": "info@karongi.gov.rw",
+      "nutrition_coordinator_name": "VM",
+      "district_health_officers": [],
+      "phone": "",
+      "active": true
+    },
+    {
+      "hospital_name": "Rwamagana Sub District",
+      "district": "Rwamagana",
+      "hospital_email": "rwamagana.hospital@moh.gov.rw",
+      "hospital_contact_person": "DG",
+      "nutrition_coordinator_email": "vmsocial@rwamagana.gov.rw",
+      "nutrition_coordinator_name": "VM",
+      "district_health_officers": [],
+      "phone": "",
+      "active": true
+    },
+    {
+      "hospital_name": "Gihundwe Sub District",
+      "district": "Rusizi",
+      "hospital_email": "gihundwe.hospital@moh.gov.rw",
+      "hospital_contact_person": "DG",
+      "nutrition_coordinator_email": "francine.mukakalisa@rusizi.gov.rw",
+      "nutrition_coordinator_name": "VM",
+      "district_health_officers": [],
+      "phone": "",
+      "active": true
+    },
+    {
+      "hospital_name": "Mibilizi Sub District",
+      "district": "Rusizi",
+      "hospital_email": "mibilizi.hospital@moh.gov.rw",
+      "hospital_contact_person": "DG",
+      "nutrition_coordinator_email": "francine.mukakalisa@rusizi.gov.rw",
+      "nutrition_coordinator_name": "VM",
+      "district_health_officers": [],
+      "phone": "",
+      "active": true
+    },
+    {
+      "hospital_name": "Remera Rukoma Sub District",
+      "district": "Kamonyi",
+      "hospital_email": "remerarukoma.hospital@moh.gov.rw",
+      "hospital_contact_person": "DG",
+      "nutrition_coordinator_email": "jacquesnsengiyumva14@gmail.com",
+      "nutrition_coordinator_name": "VM",
+      "district_health_officers": [
+        {
+          "name": "NTABANA Gaston",
+          "email": "gaston.ntabana@kamonyi.gov.rw",
+          "role": "District Health Officer"
+        }
+      ],
+      "phone": "",
+      "active": true
+    },
+    {
+      "hospital_name": "Bushenge Sub District",
+      "district": "Nyamasheke",
+      "hospital_email": "bushenge.hospital@moh.gov.rw",
+      "hospital_contact_person": "DG",
+      "nutrition_coordinator_email": "vmsocial@nyamasheke.gov.rw",
+      "nutrition_coordinator_name": "VM",
+      "district_health_officers": [
+        {
+          "name": "BYIRINGIRO Jean Paul",
+          "email": "jpbyiringiro2@gmail.com",
+          "role": "District Health Officer"
+        }
+      ],
+      "phone": "",
+      "active": true
+    },
+    {
+      "hospital_name": "Bushenge Sub District",
+      "district": "Nyamasheke",
+      "hospital_email": "nsanzabandidani@gmail.com",
+      "hospital_contact_person": "DG",
+      "nutrition_coordinator_email": "danielnsanzabandi@gmail.com",
+      "nutrition_coordinator_name": "VM",
+      "district_health_officers": [
+        {
+          "name": "BYIRINGIRO Jean Paul",
+          "email": "jpbyiringiro2@gmail.com",
+          "role": "District Health Officer"
+        }
+      ],
+      "phone": "",
+      "active": true
+    },
+    {
+      "hospital_name": "Kibogora Sub District",
+      "district": "Nyamasheke",
+      "hospital_email": "kibogora.hospital@moh.gov.rw",
+      "hospital_contact_person": "DG",
+      "nutrition_coordinator_email": "vmsocial@nyamasheke.gov.rw",
+      "nutrition_coordinator_name": "VM",
+      "district_health_officers": [
+        {
+          "name": "BYIRINGIRO Jean Paul",
+          "email": "jpbyiringiro2@gmail.com",
+          "role": "District Health Officer"
+        }
+      ],
+      "phone": "",
+      "active": true
+    }
+  ],
+  "metadata": {
+    "last_updated": "2025-02-04",
+    "updated_by": "Daniel Nsanzabandi",
+    "version": "2.0",
+    "total_hospitals": 46,
+    "total_district_health_officers_added": 14,
+    "notes": "Added district health officers as additional CC recipients. Hospital names must match District_Hospital column in CSV exactly. Set 'active' to false to temporarily disable sending to a hospital."
+  }
+}
