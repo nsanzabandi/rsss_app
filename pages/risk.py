@@ -341,6 +341,23 @@ def _sync_tab() -> html.Div:
                         className="fw-semibold d-block mt-1"),
                 ], md=4),
             ], className="g-3"),
+            dbc.Checklist(
+                id="sync-force-refetch",
+                options=[{"label": " Force full re-fetch (ignore previously-completed "
+                                    "progress for this exact date range)",
+                          "value": "force"}],
+                value=[], className="mt-2",
+                style={"fontSize": "0.8rem"},
+            ),
+            dbc.Alert(
+                [html.I(className="bi bi-info-circle me-2"),
+                 "By default, re-fetching the same date range skips districts/pages "
+                 "already synced (fast resume after an interruption). Check the box above "
+                 "if you specifically need to re-check a past window for late-arriving "
+                 "or corrected records — for ongoing new-data pickup, use Incremental "
+                 "Sync above instead."],
+                color="light", className="py-2 mt-2 mb-0", style={"fontSize": "0.78rem"},
+            ),
             html.Hr(className="my-3"),
             dbc.Alert(
                 [html.I(className="bi bi-info-circle me-2"),
@@ -717,9 +734,10 @@ def register_callbacks(app) -> None:
         State("sync-mode",           "value"),
         State("sync-range",          "start_date"),
         State("sync-range",          "end_date"),
+        State("sync-force-refetch",  "value"),
         prevent_initial_call=True,
     )
-    def _start_sync(n_mode, n_range, mode, r_start, r_end):
+    def _start_sync(n_mode, n_range, mode, r_start, r_end, force_refetch):
         from dash import ctx
         from flask import session
         # View-only users can never trigger a sync.
@@ -733,14 +751,21 @@ def register_callbacks(app) -> None:
         if ctx.triggered_id not in ("sync-start-btn", "sync-range-btn"):
             return no_update, no_update, no_update
         try:
-            from sync.etl import start_sync_job
+            from sync.etl import start_sync_job, clear_sync_progress
             if ctx.triggered_id == "sync-range-btn":
                 if not r_start or not r_end:
                     return no_update, True, dbc.Alert(
                         "Pick both a start and end date first.",
                         color="warning", className="py-2 mt-2")
-                jid = start_sync_job(mode="range", start_date=r_start, end_date=r_end)
-                label = f"Fetching {r_start} → {r_end} — 30 districts…"
+                force = bool(force_refetch and "force" in force_refetch)
+                if force:
+                    n_cleared = clear_sync_progress("range", r_start, r_end)
+                    _log_note = f" (forced full re-fetch, {n_cleared} prior progress row(s) cleared)"
+                else:
+                    _log_note = ""
+                jid = start_sync_job(mode="range", start_date=r_start, end_date=r_end,
+                                     resume=not force)
+                label = f"Fetching {r_start} → {r_end} — 30 districts…{_log_note}"
             else:
                 jid = start_sync_job(mode=mode or "sync")
                 label = f"Sync started ({mode} mode) — 30 districts…"
@@ -784,6 +809,11 @@ def register_callbacks(app) -> None:
 
             if done and job["status"] == "completed":
                 invalidate_cache()
+                # Pre-warm the heavy per-child table now (mirrors app.py's
+                # auto-sync loop) so the next dashboard visitor doesn't pay
+                # the ~2 min rebuild cost on their own page load.
+                from data import warm_child_level
+                warm_child_level()
 
             prog = _progress_ui(
                 done_count, total_rows, 30, active_dist,

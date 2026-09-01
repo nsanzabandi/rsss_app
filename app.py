@@ -12,7 +12,14 @@ from __future__ import annotations
 
 import os
 import sys
+import warnings
 from pathlib import Path
+
+# Suppress pandas FutureWarnings and SQLAlchemy warnings globally
+warnings.filterwarnings('ignore', category=FutureWarning)
+warnings.filterwarnings('ignore', '.*pandas only supports SQLAlchemy.*')
+import pandas as pd
+#pd.set_option('future.no_silent_downcasting', True)
 
 BASE_DIR = Path(__file__).parent
 if str(BASE_DIR) not in sys.path:
@@ -109,7 +116,7 @@ def test_email_route():
             body       = (
                 "This is a test email from the RSSS system.\n\n"
                 "If you received this, email delivery is working correctly.\n\n"
-                "— RSSS Rwanda Stunting Surveillance System"
+                "RSSS Rwanda Stunting Surveillance System"
             ),
             attachments= [],
         )
@@ -159,6 +166,10 @@ def route(pathname: str):
         from pages.risk import layout
         return layout(user)
 
+    if path == "/ebuzima":
+        from pages.ebuzima import layout
+        return layout(user)
+
     return _not_found(path)
 
 
@@ -182,11 +193,13 @@ from pages.dashboard import register_callbacks as _reg_dashboard
 from pages.reports   import register_callbacks as _reg_reports
 from pages.followup  import register_callbacks as _reg_followup
 from pages.risk      import register_callbacks as _reg_risk
+from pages.ebuzima   import register_callbacks as _reg_ebuzima
 
 _reg_dashboard(app)
 _reg_reports(app)
 _reg_followup(app)
 _reg_risk(app)
+_reg_ebuzima(app)
 
 
 # ── Automatic background sync ──────────────────────────────────────────────────

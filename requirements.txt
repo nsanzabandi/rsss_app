@@ -12,3 +12,8 @@ gunicorn>=21.2.0
 gevent>=24.2.1
 python-dotenv>=1.0.0
 Pillow>=10.0.0
+
+# eBuzima Nutrition Analytics page (pages/ebuzima.py, ebuzima/*)
+sqlalchemy>=2.0.0
+clickhouse-connect>=0.7.0
+requests>=2.31.0

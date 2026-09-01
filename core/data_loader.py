@@ -59,6 +59,7 @@ class StuntingDataLoader:
                       f"from {active()} backend ({s['table']})…")
 
         # Core analytics columns (backend-neutral).
+        event_id_col = (f", {s['event_id']} AS event_id" if s.get("event_id") else "")
         core = f"""
                 {s['tei']}       AS tracked_entity_instance,
                 {s['gender']}    AS gender,
@@ -89,59 +90,101 @@ class StuntingDataLoader:
             """
         else:
             extra = ""
-        sql = f"""
-            SELECT {core}{extra}
+        # Two-step fetch: WHO HAZ computation (add_computed_stunting, below)
+        # imputes a visit's missing/implausible height from that SAME
+        # child's OTHER visits — but only if those other visits are present
+        # in the batch it's given. Fetching only this month's rows starves
+        # it of that context: a child whose only July row has a null/outlier
+        # height would get an uncomputable HAZ and silently vanish from the
+        # stunted count, even though the dashboard (which always loads full
+        # history before scoping to a period) can impute it fine. So: first
+        # find which children had any visit this month, then fetch each of
+        # THEIR full visit history, compute HAZ with full context, and only
+        # then narrow down to this month's (latest) visit per child.
+        id_sql = f"""
+            SELECT DISTINCT {s['tei']}
             FROM {s['table']}
             WHERE EXTRACT(YEAR  FROM {s['imm_date']}) = %(year)s
               AND EXTRACT(MONTH FROM {s['imm_date']}) = %(month)s
         """
+        sql = f"""
+            SELECT {core}{extra}{event_id_col}
+            FROM {s['table']}
+            WHERE {s['tei']} = ANY(%(ids)s)
+        """
         try:
             conn = self._connect()
             cur  = conn.cursor()
-            cur.execute(sql, {"year": year, "month": month})
+            cur.execute(id_sql, {"year": year, "month": month})
+            child_ids = [r[0] for r in cur.fetchall() if r[0]]
+            if not child_ids:
+                cur.close()
+                conn.close()
+                self.log.warning("No records found for this period.")
+                return {}
+            cur.execute(sql, {"ids": child_ids})
             cols = [d[0] for d in cur.description]
             rows = cur.fetchall()
             cur.close()
             conn.close()
-            self.all_df = pd.DataFrame(rows, columns=cols)
+            full_history = pd.DataFrame(rows, columns=cols)
         except Exception as exc:
             self.log.error(f"Database error: {exc}")
             return {}
 
-        if self.all_df.empty:
+        if full_history.empty:
             self.log.warning("No records found for this period.")
             return {}
 
-        self.log.info(f"Loaded {len(self.all_df):,} records total.")
+        self.log.info(f"Loaded {len(full_history):,} visit records "
+                      f"({len(child_ids):,} children active this period).")
 
         # Normalise columns
-        self.all_df = self._normalise(self.all_df)
+        full_history = self._normalise(full_history)
 
         # Compute WHO height-for-age stunting (accurate) instead of trusting the
         # eTracker column, so reports match the dashboard. Falls back to the
-        # column if measurements (height/DOB/sex) are unavailable.
+        # column if measurements (height/DOB/sex) are unavailable. Runs on the
+        # FULL history (see above) so imputation has surrounding visits to work
+        # with, then we narrow down to this month's rows right after.
         try:
             from core.stunting_calculator import add_computed_stunting
-            self.all_df = add_computed_stunting(self.all_df)
+            full_history = add_computed_stunting(full_history)
+        except Exception as exc:
+            self.log.warning(f"HAZ compute skipped ({exc}) — using column.")
+
+        self.all_df = full_history[
+            (pd.to_datetime(full_history["immunization_date"], errors="coerce").dt.year == year) &
+            (pd.to_datetime(full_history["immunization_date"], errors="coerce").dt.month == month)
+        ].copy()
+        if "haz_calc" in self.all_df.columns:
             haz = self.all_df["haz_calc"]
             self.all_df["severe_stunting"] = np.where(haz < -3, "Yes", "No")
             n_haz = int(haz.notna().sum())
             self.log.info(f"WHO HAZ computed for {n_haz:,}/{len(self.all_df):,} records.")
-        except Exception as exc:
-            self.log.warning(f"HAZ compute skipped ({exc}) — using column.")
 
-        # Filter stunted children, then DEDUPLICATE to one row per child (latest
-        # visit) so the case list, email summary and PDF all report the same
-        # number of unique children — not visit-events.
-        self.stunted_df = self._filter_stunted(self.all_df)
+        # DEDUPLICATE to one row per child (latest visit within the period)
+        # FIRST, then filter to stunted status on that latest visit. Filtering
+        # before deduping would instead count anyone stunted at ANY visit
+        # this period — including a child who recovered by their last visit —
+        # which doesn't match the dashboard's "current (latest visit)"
+        # methodology (data.build_period_child_df) and made the report and
+        # dashboard totals diverge for the same period.
         tei = "tracked_entity_instance"
-        if tei in self.stunted_df.columns and not self.stunted_df.empty:
-            if "immunization_date" in self.stunted_df.columns:
-                self.stunted_df = (self.stunted_df
-                                   .sort_values("immunization_date")
-                                   .drop_duplicates(subset=[tei], keep="last"))
+        latest = self.all_df
+        if tei in latest.columns and not latest.empty:
+            if "immunization_date" in latest.columns:
+                # event_id as a secondary sort key so ties on the same visit
+                # date resolve the same way every time — SQL doesn't
+                # guarantee row order, so without this, repeated runs of the
+                # exact same query could report different stunted counts.
+                sort_cols = (["immunization_date", "event_id"]
+                            if "event_id" in latest.columns else ["immunization_date"])
+                latest = (latest.sort_values(sort_cols)
+                                .drop_duplicates(subset=[tei], keep="last"))
             else:
-                self.stunted_df = self.stunted_df.drop_duplicates(subset=[tei])
+                latest = latest.drop_duplicates(subset=[tei])
+        self.stunted_df = self._filter_stunted(latest)
         self.log.info(f"Stunted children (unique): {len(self.stunted_df):,}.")
 
         if self.stunted_df.empty:
@@ -233,6 +276,17 @@ class StuntingDataLoader:
         return (
             self.all_df.groupby("district_hospital")[tei].nunique().to_dict()
         )
+
+    def get_total_vaccinated_unique(self) -> int:
+        """True national unique-child count (from all_df) — NOT the sum of
+        get_vaccinated_counts_by_hospital(), which double-counts any child
+        who visited more than one hospital within the period."""
+        if self.all_df is None or self.all_df.empty:
+            return 0
+        tei = "tracked_entity_instance"
+        if tei in self.all_df.columns:
+            return int(self.all_df[tei].nunique())
+        return len(self.all_df)
 
     def get_vaccinated_counts_by_facility(self) -> dict[str, int]:
         """Count all children vaccinated per health facility."""

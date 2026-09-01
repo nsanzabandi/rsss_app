@@ -61,24 +61,100 @@ _MEDIUM_HEIGHT_FRACTION = 0.30   # < 30% of expected height gain → MEDIUM
 
 
 def _who_norms(age_months: float) -> tuple[float, float]:
-    """Return (min_weight_kg_per_mo, min_height_cm_per_mo) for a given age."""
+    """Return (min_weight_kg_per_mo, min_height_cm_per_mo) for a given age.
+
+    Not called on the hot path (see _who_norms_vectorized below) — kept as
+    the scalar reference definition the vectorised version must match.
+    """
     for a_start, a_end, w_min, h_min in _WHO_VEL:
         if a_start <= age_months < a_end:
             return w_min, h_min
     return _WHO_VEL[-1][2], _WHO_VEL[-1][3]   # oldest bracket
 
 
+# Bin edges / lookup tables for the vectorised equivalent of _who_norms(),
+# used by _who_norms_vectorized() below — same brackets, same fallback.
+_WHO_BIN_EDGES = [b[0] for b in _WHO_VEL] + [_WHO_VEL[-1][1]]
+_WHO_WMIN      = np.array([b[2] for b in _WHO_VEL])
+_WHO_HMIN      = np.array([b[3] for b in _WHO_VEL])
+
+
+def _who_norms_vectorized(age: pd.Series) -> tuple[pd.Series, pd.Series]:
+    """Vectorised equivalent of _who_norms() applied to a whole Series at once.
+
+    Same bracket logic (a_start <= age < a_end), same last-bracket fallback
+    for out-of-range values. Values are meaningless where age is NaN, but
+    callers already guard on age.notna() before using them (matching the
+    original row-wise function, which was simply never called for NaN age).
+    """
+    idx = pd.cut(age.fillna(-1), bins=_WHO_BIN_EDGES, labels=False,
+                 right=False, include_lowest=True)
+    idx = idx.fillna(len(_WHO_VEL) - 1).astype(int).clip(0, len(_WHO_VEL) - 1)
+    w_min = pd.Series(_WHO_WMIN[idx.to_numpy()], index=age.index)
+    h_min = pd.Series(_WHO_HMIN[idx.to_numpy()], index=age.index)
+    return w_min, h_min
+
+
 def _age_from_dob(
     dob: Optional[pd.Timestamp],
     visit_date: Optional[pd.Timestamp],
 ) -> Optional[float]:
-    """Return exact age in months from date_of_birth and visit date."""
+    """Return exact age in months from date_of_birth and visit date.
+
+    Not called on the hot path (see _age_from_dob_vectorized below) — kept
+    as the scalar reference definition the vectorised version must match.
+    """
     if pd.isna(dob) or pd.isna(visit_date):
         return None
     days = (visit_date - dob).days
     if days < 0:
         return None      # data entry error — visit before birth
     return days / 30.4375
+
+
+def _age_from_dob_vectorized(dob: pd.Series, visit_date: pd.Series) -> pd.Series:
+    """Vectorised equivalent of _age_from_dob() applied to whole Series at once."""
+    days = (visit_date - dob).dt.days
+    age = days / 30.4375
+    return age.where(days >= 0)   # NaN where visit-before-birth or either side NaT
+
+
+def _classify_row(row) -> str:
+    """Per-visit risk classification for a single row.
+
+    Not called on the hot path — classify_at_risk() below uses the vectorised
+    version of this exact logic (np.select over high_mask/medium_mask). Kept
+    here as the scalar reference definition the vectorised version must match.
+    """
+    age   = row["_age"]
+    w_vel = row["weight_velocity"]
+    h_vel = row["height_velocity"]
+    muac  = row["_muac"]
+    wast  = str(row.get("wasting_status", "") or "").lower()
+
+    # ── HIGH ──────────────────────────────────────────────────────────────
+    if not pd.isna(muac) and muac < _MUAC_HIGH:
+        return "HIGH"
+    if "severe" in wast:
+        return "HIGH"
+    if not pd.isna(w_vel) and w_vel < 0:
+        return "HIGH"   # actual weight loss
+
+    # ── WHO velocity comparison ───────────────────────────────────────────
+    if not pd.isna(age):
+        w_min, h_min = _who_norms(age)
+        if not pd.isna(w_vel) and w_vel < (w_min * _MEDIUM_WEIGHT_FRACTION):
+            return "MEDIUM"
+        if not pd.isna(h_vel) and h_vel < (h_min * _MEDIUM_HEIGHT_FRACTION):
+            return "MEDIUM"
+
+    # ── MEDIUM (no age needed) ────────────────────────────────────────────
+    if not pd.isna(muac) and muac < _MUAC_MEDIUM:
+        return "MEDIUM"
+    if "moderate" in wast or "wasted" in wast:
+        return "MEDIUM"
+
+    return "OK"
 
 
 # ── MUAC parser ───────────────────────────────────────────────────────────────
@@ -132,10 +208,9 @@ def classify_at_risk(df: pd.DataFrame) -> pd.DataFrame:
     # ── Compute exact age from DOB where available ─────────────────────────────
     dob_available = df["date_of_birth"].notna() & df["immunization_date"].notna()
     if dob_available.any():
-        df.loc[dob_available, "_exact_age"] = df.loc[dob_available].apply(
-            lambda r: _age_from_dob(r["date_of_birth"], r["immunization_date"]),
-            axis=1,
-        )
+        df["_exact_age"] = _age_from_dob_vectorized(
+            df["date_of_birth"], df["immunization_date"]
+        ).where(dob_available)
         # Use exact age where computable; fall back to recorded age_in_months
         df["_age"] = df["_exact_age"].fillna(df["age_in_months"])
     else:
@@ -176,41 +251,38 @@ def classify_at_risk(df: pd.DataFrame) -> pd.DataFrame:
     df.loc[df["weight_velocity"].abs() > 3.0,  "weight_velocity"] = np.nan
     df.loc[df["height_velocity"].abs() > 10.0, "height_velocity"] = np.nan
 
-    # ── Per-visit risk classification ─────────────────────────────────────────
-    def _classify_row(row) -> str:
-        age   = row["_age"]
-        w_vel = row["weight_velocity"]
-        h_vel = row["height_velocity"]
-        muac  = row["_muac"]
-        wast  = str(row.get("wasting_status", "") or "").lower()
+    # ── Per-visit risk classification (vectorised) ────────────────────────────
+    # Same precedence as the row-wise version this replaces: HIGH conditions
+    # checked first (muac<11.5 OR "severe" in wasting_status OR weight loss),
+    # then age-dependent MEDIUM velocity checks, then MEDIUM muac/wasting —
+    # np.select() picks the first true condition per row, matching the
+    # original if/elif early-return order exactly.
+    muac = df["_muac"]
+    w_vel = df["weight_velocity"]
+    h_vel = df["height_velocity"]
+    age   = df["_age"]
+    wast  = (df["wasting_status"] if "wasting_status" in df.columns
+             else pd.Series("", index=df.index)).fillna("").astype(str).str.lower()
 
-        # ── HIGH ──────────────────────────────────────────────────────────────
-        if not pd.isna(muac) and muac < _MUAC_HIGH:
-            return "HIGH"
-        if "severe" in wast:
-            return "HIGH"
-        if not pd.isna(w_vel) and w_vel < 0:
-            return "HIGH"   # actual weight loss
+    who_w_min, who_h_min = _who_norms_vectorized(age)
 
-        # ── WHO velocity comparison ───────────────────────────────────────────
-        if not pd.isna(age):
-            w_min, h_min = _who_norms(age)
-            if not pd.isna(w_vel) and w_vel < (w_min * _MEDIUM_WEIGHT_FRACTION):
-                return "MEDIUM"
-            if not pd.isna(h_vel) and h_vel < (h_min * _MEDIUM_HEIGHT_FRACTION):
-                return "MEDIUM"
+    high_mask = (
+        (muac.notna() & (muac < _MUAC_HIGH)) |
+        wast.str.contains("severe", na=False) |
+        (w_vel.notna() & (w_vel < 0))
+    )
+    medium_velocity_mask = age.notna() & (
+        (w_vel.notna() & (w_vel < who_w_min * _MEDIUM_WEIGHT_FRACTION)) |
+        (h_vel.notna() & (h_vel < who_h_min * _MEDIUM_HEIGHT_FRACTION))
+    )
+    medium_other_mask = (
+        (muac.notna() & (muac < _MUAC_MEDIUM)) |
+        wast.str.contains("moderate", na=False) |
+        wast.str.contains("wasted", na=False)
+    )
+    medium_mask = medium_velocity_mask | medium_other_mask
 
-        # ── MEDIUM (no age needed) ────────────────────────────────────────────
-        if not pd.isna(muac) and muac < _MUAC_MEDIUM:
-            return "MEDIUM"
-        if "moderate" in wast or "wasted" in wast:
-            return "MEDIUM"
-
-        return "OK"
-
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        df["risk_level"] = df.apply(_classify_row, axis=1)
+    df["risk_level"] = np.select([high_mask, medium_mask], ["HIGH", "MEDIUM"], default="OK")
 
     # ── Aggregate to one row per child (worst risk ever seen) ─────────────────
     risk_order = {"HIGH": 3, "MEDIUM": 2, "OK": 1}
@@ -398,6 +470,7 @@ def build_risk_df_for_dashboard(df: pd.DataFrame,
             SELECT
                 entity_id,
                 entity_id                   AS tracked_entity_instance,
+                child_name,
                 date_of_birth,
                 gender,
                 last_immunization_date      AS immunization_date,
@@ -410,6 +483,8 @@ def build_risk_df_for_dashboard(df: pd.DataFrame,
                 health_facility,
                 h_district_hospital         AS district_hospital,
                 {_DIST}                     AS district,
+                mother_names, mother_phone,
+                father_names, father_phone,
                 bcg, opv, hep_b_birth, dpt_hepb_hib,
                 pneumococcal, rotavirus, measles_rubella, hpv
             FROM immunization_vaccination
@@ -434,6 +509,70 @@ def build_risk_df_for_dashboard(df: pd.DataFrame,
         return classify_at_risk(all_visits)
     except Exception:
         return classify_at_risk(df)
+
+
+def build_risk_df_for_period(stunted_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    At-risk (growth-velocity) classification scoped to a specific reporting
+    period's stunted cohort — NOT all-time, and NOT all vaccinated children.
+
+    Matches how the At-Risk dashboard page frames the question ("of children
+    who are stunted, which ones are getting worse?"), scoped down further to
+    just the children stunted in this reporting month — e.g. "July: 30,000
+    vaccinated, 5,000 stunted, ~3,000 at-risk" rather than an all-time,
+    all-children figure that isn't comparable to the rest of a monthly report.
+
+    Velocity needs each child's full visit history (not just their one row in
+    stunted_df), so this loads that history from the DB for just these
+    children's IDs — not a full-table scan like build_risk_df_for_dashboard's
+    "no filter" fallback.
+    """
+    tei_col = ("tracked_entity_instance" if "tracked_entity_instance" in stunted_df.columns
+               else "entity_id" if "entity_id" in stunted_df.columns else None)
+    if tei_col is None:
+        return pd.DataFrame()
+    ids = [i for i in stunted_df[tei_col].dropna().unique().tolist() if i]
+    if not ids:
+        return pd.DataFrame()
+
+    _DIST = "COALESCE(h_district, residence_district, district_source)"
+    try:
+        from config.db_local import get_local_conn
+        conn = get_local_conn()
+        sql = f"""
+            SELECT
+                entity_id,
+                entity_id                   AS tracked_entity_instance,
+                child_name,
+                date_of_birth,
+                gender,
+                last_immunization_date      AS immunization_date,
+                age_visit_months            AS age_in_months,
+                weight_visit_kg             AS weight_at_visit_kg,
+                height_visit_cm             AS height_at_visit_cm,
+                muac_cm,
+                stunting_status,
+                wasting_status,
+                health_facility,
+                h_district_hospital         AS district_hospital,
+                {_DIST}                     AS district,
+                mother_names, mother_phone,
+                father_names, father_phone,
+                bcg, opv, hep_b_birth, dpt_hepb_hib,
+                pneumococcal, rotavirus, measles_rubella, hpv
+            FROM immunization_vaccination
+            WHERE entity_id = ANY(%s)
+        """
+        cur = conn.cursor()
+        cur.execute(sql, (ids,))
+        cols = [d[0] for d in cur.description]
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        visits = pd.DataFrame(rows, columns=cols)
+        return classify_at_risk(visits)
+    except Exception:
+        return pd.DataFrame()
 
 
 # ── Summary helpers ───────────────────────────────────────────────────────────

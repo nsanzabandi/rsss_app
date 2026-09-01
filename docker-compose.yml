@@ -1,0 +1,53 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${LOCAL_DB_USER:-rsss_db_user}
+      POSTGRES_PASSWORD: ${LOCAL_DB_PASSWORD}
+      POSTGRES_DB: ${LOCAL_DB_NAME:-immunization_db}
+      # Consumed by deploy/postgres-init/01-ebuzima-db.sh on first boot only.
+      EBUZIMA_DB_USER: ${EBUZIMA_DB_USER}
+      EBUZIMA_DB_PASSWORD: ${EBUZIMA_DB_PASSWORD}
+      EBUZIMA_DB_NAME: ${EBUZIMA_DB_NAME:-ebuzima_db}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./deploy/postgres-init:/docker-entrypoint-initdb.d:ro
+    networks: [rsss_net]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${LOCAL_DB_USER:-rsss_db_user} -d ${LOCAL_DB_NAME:-immunization_db}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./config:/app/config
+      - ./logs:/app/logs
+      - ./reports:/app/reports
+      - ./data:/app/data
+    networks: [rsss_net]
+
+  nginx:
+    image: nginx:alpine
+    restart: unless-stopped
+    depends_on:
+      - app
+    ports:
+      - "80:80"
+    volumes:
+      - ./deploy/nginx.docker.conf:/etc/nginx/conf.d/rsss.conf:ro
+      - ./assets:/opt/rsss_app/assets:ro
+    networks: [rsss_net]
+
+networks:
+  rsss_net:
+
+volumes:
+  pgdata:

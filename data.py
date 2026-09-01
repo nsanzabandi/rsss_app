@@ -15,6 +15,12 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import warnings
+
+# Suppress pandas FutureWarnings and SQLAlchemy warnings
+pd.set_option('future.no_silent_downcasting', True)
+warnings.filterwarnings('ignore', category=FutureWarning)
+warnings.filterwarnings('ignore', '.*pandas only supports SQLAlchemy.*')
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -148,8 +154,8 @@ def _normalise(df: pd.DataFrame) -> pd.DataFrame:
         if col in df.columns:
             df[col] = (
                 df[col].astype(str)
-                .replace(["nan", "NaN", "None", "null", "none", ""], np.nan)
                 .str.strip()
+                .replace(["nan", "NaN", "None", "null", "none", ""], np.nan)
             )
 
     # Canonical gender — merge 'M'/'Male' and 'F'/'Female' so they aren't split.
@@ -348,6 +354,7 @@ def get_all_df() -> pd.DataFrame | None:
 
 _MEAS_SQL = """
 SELECT
+    event_id,
     entity_id                AS tracked_entity_instance,
     gender,
     date_of_birth,
@@ -428,8 +435,98 @@ _child_cache: dict = {}
 _child_lock = threading.Lock()
 _child_state = {"status": "idle"}   # idle | running | done | error
 
+# ── Disk-backed cache (populated by tools/build_child_cache.py) ────────────────
+# The heavy build (~2 min, CPU-bound) doesn't have to run inside the same
+# process that serves the dashboard. tools/build_child_cache.py can run it on
+# a schedule (cron/systemd timer) and write the result here; the app then just
+# reads it — immune to system load, and survives app restarts (no more waiting
+# out a fresh 2-minute build every time the process restarts). If no disk
+# cache exists yet (fresh install, or the scheduled job hasn't run), the app
+# falls back to building it in-process exactly as before — fully backward
+# compatible.
+_DISK_CACHE_DIR      = Path(__file__).parent / "data" / "cache"
+_DISK_CACHE_MAX_AGE  = 2 * 3600   # accept a disk cache up to 2h old before giving up on it
 
-def _build_child_and_monthly(meas: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+
+def _disk_cache_paths() -> dict:
+    return {
+        "child":    _DISK_CACHE_DIR / "child.pkl",
+        "monthly":  _DISK_CACHE_DIR / "monthly.pkl",
+        "schedule": _DISK_CACHE_DIR / "schedule.pkl",
+        "visits":   _DISK_CACHE_DIR / "visits.pkl",
+        "meta":     _DISK_CACHE_DIR / "meta.json",
+    }
+
+
+def save_child_cache_to_disk(child: pd.DataFrame, monthly: pd.DataFrame,
+                             schedule: pd.DataFrame, visits: pd.DataFrame) -> None:
+    """Persist the built tables to disk and update the in-memory cache.
+
+    Called by both warm_child_level()'s in-process worker (so a manually
+    triggered rebuild is also durable across restarts) and by the standalone
+    tools/build_child_cache.py script.
+    """
+    import json
+    _DISK_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    paths = _disk_cache_paths()
+    child.to_pickle(paths["child"])
+    monthly.to_pickle(paths["monthly"])
+    schedule.to_pickle(paths["schedule"])
+    visits.to_pickle(paths["visits"])
+    built_at = time.time()
+    paths["meta"].write_text(json.dumps({"built_at": built_at, "n_children": len(child)}))
+    with _child_lock:
+        _child_cache["child"]    = child
+        _child_cache["monthly"]  = monthly
+        _child_cache["schedule"] = schedule
+        _child_cache["visits"]   = visits
+        _child_cache["ts"]       = built_at
+        _child_state["status"]   = "done"
+
+
+def _refresh_from_disk_if_newer() -> bool:
+    """If a disk cache exists and is newer than what's in memory, load it.
+
+    Cheap when there's nothing new to do (just a JSON timestamp read).
+    Returns True if the in-memory cache was (re)loaded from disk.
+    """
+    import json
+    paths = _disk_cache_paths()
+    if not paths["meta"].exists():
+        return False
+    try:
+        meta = json.loads(paths["meta"].read_text())
+        built_at = float(meta.get("built_at", 0))
+    except Exception:
+        return False
+    if (time.time() - built_at) > _DISK_CACHE_MAX_AGE:
+        return False   # too stale to trust — caller falls back to live rebuild
+    with _child_lock:
+        if _child_cache.get("ts", 0) >= built_at:
+            return False   # already have this version (or newer) in memory
+    try:
+        child    = pd.read_pickle(paths["child"])
+        monthly  = pd.read_pickle(paths["monthly"])
+        schedule = pd.read_pickle(paths["schedule"])
+        visits   = pd.read_pickle(paths["visits"])
+    except Exception as exc:
+        print(f"[data] disk cache read failed: {exc}")
+        return False
+    with _child_lock:
+        _child_cache["child"]    = child
+        _child_cache["monthly"]  = monthly
+        _child_cache["schedule"] = schedule
+        _child_cache["visits"]   = visits
+        _child_cache["ts"]       = built_at
+        _child_state["status"]   = "done"
+    print(f"[data] Loaded child-level cache from disk ({len(child):,} children, "
+          f"built {(time.time()-built_at)/60:.0f} min ago).")
+    return True
+
+
+def _build_child_and_monthly(
+    meas: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     from core.stunting_calculator import add_computed_stunting, _resolve
 
     v = add_computed_stunting(meas)
@@ -439,14 +536,23 @@ def _build_child_and_monthly(meas: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataF
     v["_stunted"] = v["haz_calc"] < -2
     v["_severe"]  = v["haz_calc"] < -3
 
-    geo = [c for c in ("province", "district", "district_hospital") if c in v.columns]
+    # health_facility included so filter_by_user's health_center-role branch
+    # (which matches on this column) actually has something to filter on here.
+    geo = [c for c in ("province", "district", "district_hospital", "health_facility")
+          if c in v.columns]
+
+    # Secondary sort key so ties on the same visit date resolve the same way
+    # every time — SQL doesn't guarantee row order, so without this, which
+    # tied row survives drop_duplicates(keep="last") (and therefore the
+    # final stunted count) could vary between identical queries.
+    _sort_cols = ["_o", "event_id"] if "event_id" in v.columns else ["_o"]
 
     # ── one row per child = latest visit overall (keeps geo even if HAZ null) ──
-    latest_all = (v.sort_values("_o").drop_duplicates(subset=[tei], keep="last")).copy()
+    latest_all = (v.sort_values(_sort_cols).drop_duplicates(subset=[tei], keep="last")).copy()
 
     # current status from latest VALID (HAZ-computable) visit
     valid = v[v["haz_calc"].notna()]
-    latest_valid = (valid.sort_values("_o")
+    latest_valid = (valid.sort_values(_sort_cols)
                          .drop_duplicates(subset=[tei], keep="last")
                          .set_index(tei))
     ever = (valid.assign(_s=valid["haz_calc"] < -2).groupby(tei)["_s"].max())
@@ -483,6 +589,24 @@ def _build_child_and_monthly(meas: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataF
 
     child = child.reset_index().rename(columns={tei: "tracked_entity_instance"})
 
+    # ── slim visit-level table for PERIOD-scoped queries ──────────────────────
+    # `child` collapses each child to their single latest visit EVER, so
+    # filtering it by date only keeps children whose absolute latest visit
+    # happens to fall in the selected window — wrong for "how many children
+    # were found stunted during July," which needs to look at each child's
+    # latest visit WITHIN July, not their latest visit overall. Keep the raw
+    # HAZ-computable visits (slimmed to just what period summaries need) so
+    # build_period_child_df() can answer that correctly, cheaply, without
+    # re-running add_computed_stunting().
+    visits_cols = [c for c in ("province", "district", "district_hospital") if c in valid.columns]
+    if "event_id" in valid.columns:
+        visits_cols = ["event_id"] + visits_cols
+    visits = valid[[tei] + visits_cols].copy()
+    visits["immunization_date"] = valid["_o"]
+    visits["is_stunted"] = valid["haz_calc"] < -2
+    visits["is_severe"]  = valid["haz_calc"] < -3
+    visits = visits.rename(columns={tei: "tracked_entity_instance"})
+
     # ── monthly × geo aggregates for the trend (computed stunting) ────────────
     today = pd.Timestamp.today().normalize()
     vv = valid[valid["_o"].notna() & (valid["_o"] <= today)].copy()
@@ -504,27 +628,61 @@ def _build_child_and_monthly(meas: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataF
                            stunted=("_stunted", "sum"),
                            severe=("_severe", "sum"))
                       .reset_index())
-    return child, monthly, schedule
+    return child, monthly, schedule, visits
 
 
 def get_child_df() -> pd.DataFrame | None:
+    _refresh_from_disk_if_newer()   # cheap; picks up a scheduled rebuild without waiting
     with _child_lock:
-        if "child" in _child_cache and (time.time() - _child_cache.get("ts", 0)) < _CACHE_TTL:
+        if "child" in _child_cache and (time.time() - _child_cache.get("ts", 0)) < _DISK_CACHE_MAX_AGE:
             return _child_cache["child"]
     return None
 
 
 def get_monthly_df() -> pd.DataFrame | None:
+    _refresh_from_disk_if_newer()
     with _child_lock:
-        if "monthly" in _child_cache and (time.time() - _child_cache.get("ts", 0)) < _CACHE_TTL:
+        if "monthly" in _child_cache and (time.time() - _child_cache.get("ts", 0)) < _DISK_CACHE_MAX_AGE:
             return _child_cache["monthly"]
     return None
 
 
 def get_schedule_df() -> pd.DataFrame | None:
+    _refresh_from_disk_if_newer()
     with _child_lock:
-        if "schedule" in _child_cache and (time.time() - _child_cache.get("ts", 0)) < _CACHE_TTL:
+        if "schedule" in _child_cache and (time.time() - _child_cache.get("ts", 0)) < _DISK_CACHE_MAX_AGE:
             return _child_cache["schedule"]
+    return None
+
+
+def get_visits_df() -> pd.DataFrame | None:
+    """Slim per-visit computed-stunting table (one row per HAZ-computable
+    visit), used by build_period_child_df() for date-range-scoped KPIs."""
+    _refresh_from_disk_if_newer()
+    with _child_lock:
+        if "visits" in _child_cache and (time.time() - _child_cache.get("ts", 0)) < _DISK_CACHE_MAX_AGE:
+            return _child_cache["visits"]
+    return None
+
+
+def get_monthly_df_stale_ok() -> pd.DataFrame | None:
+    """Like get_monthly_df(), but ignores the normal freshness ceiling.
+
+    For report generation (e.g. the National Overview trend chart), where a
+    slightly-old trend beats a missing one — unlike live dashboard KPIs,
+    which must not silently show outdated counts. Falls back to reading the
+    on-disk cache file directly if nothing usable is in memory yet.
+    """
+    _refresh_from_disk_if_newer()
+    with _child_lock:
+        if "monthly" in _child_cache:
+            return _child_cache["monthly"]
+    path = _disk_cache_paths()["monthly"]
+    if path.exists():
+        try:
+            return pd.read_pickle(path)
+        except Exception:
+            return None
     return None
 
 
@@ -534,7 +692,16 @@ def child_build_status() -> str:
 
 
 def warm_child_level() -> None:
-    """Build the per-child table + monthly trend in the background (idempotent)."""
+    """Ensure the per-child table + monthly trend are available (idempotent).
+
+    Checks the disk cache first (written by tools/build_child_cache.py on a
+    schedule, or by a previous in-process build) — that's near-instant and
+    immune to system load. Only falls back to a full in-process rebuild
+    (~2 min, CPU-bound) if no usable disk cache exists, e.g. a fresh install
+    that hasn't run the scheduled build yet.
+    """
+    if _refresh_from_disk_if_newer():
+        return
     with _child_lock:
         if _child_state["status"] == "running":
             return
@@ -549,13 +716,8 @@ def warm_child_level() -> None:
                 with _child_lock:
                     _child_state["status"] = "error"
                 return
-            child, monthly, schedule = _build_child_and_monthly(meas)
-            with _child_lock:
-                _child_cache["child"]    = child
-                _child_cache["monthly"]  = monthly
-                _child_cache["schedule"] = schedule
-                _child_cache["ts"]       = time.time()
-                _child_state["status"]   = "done"
+            child, monthly, schedule, visits = _build_child_and_monthly(meas)
+            save_child_cache_to_disk(child, monthly, schedule, visits)
             print(f"[data] Child-level table ready ({len(child):,} children).")
         except Exception as exc:
             import traceback; traceback.print_exc()
@@ -564,6 +726,137 @@ def warm_child_level() -> None:
             print(f"[data] Child-level build failed: {exc}")
 
     threading.Thread(target=_worker, daemon=True).start()
+
+
+def monthly_rate(monthly: pd.DataFrame, start=None, end=None, value: str = "rate") -> pd.DataFrame:
+    """Collapse the monthly×geo table (get_monthly_df()) to a national-or-
+    already-geo-filtered monthly series, dropping future and thin
+    (low-denominator) months that make the line spike. Shared by the
+    dashboard's Stunting Rate Over Time chart and the national overview PDF's
+    trend chart, so both tell the same story from the same numbers.
+
+    value="rate"   → % of measured children who are stunted
+    value="severe" → % of stunted children who are severely stunted
+    """
+    m = (monthly.groupby("month")
+                .agg(measured=("measured", "sum"),
+                     stunted=("stunted", "sum"),
+                     severe=("severe", "sum"))
+                .reset_index())
+    if start:
+        m = m[m["month"] >= pd.Timestamp(start)]
+    if end:
+        m = m[m["month"] <= pd.Timestamp(end)]
+    if m.empty:
+        return m
+    # Drop sparse/partial months relative to a typical busy month, so the line
+    # isn't dragged by the current partial month or future-dated stragglers.
+    # Only for a wide/default view, though — an explicitly narrowed range
+    # (e.g. the user picked a single month) should show exactly what's in
+    # it, not get thinned out by a heuristic meant for a long history.
+    narrow = False
+    if start and end:
+        try:
+            narrow = (pd.Timestamp(end) - pd.Timestamp(start)).days < _NARROW_RANGE_DAYS
+        except Exception:
+            narrow = False
+    if not narrow:
+        busy = m["measured"].quantile(0.75)
+        thresh = max(100, 0.30 * busy)
+        m = m[m["measured"] >= thresh].copy()
+    if value == "rate":
+        m["y"] = (m["stunted"] / m["measured"] * 100).round(1)
+    else:  # severe share of stunted
+        m = m[m["stunted"] > 0]
+        m["y"] = (m["severe"] / m["stunted"] * 100).round(1)
+    return m
+
+
+def build_period_child_df(visits: pd.DataFrame | None,
+                          start: str | None, end: str | None) -> pd.DataFrame:
+    """
+    Scope the per-visit computed-stunting table to a date window, then dedupe
+    to one row per child using their LATEST visit WITHIN that window — not
+    their latest visit ever. This matches how the monthly hospital/facility/
+    national reports define a period's stunting cohort (core/data_loader.py),
+    so a "Total Stunted" KPI filtered to e.g. July reflects children actually
+    seen and assessed in July, not just the (much smaller) set of children
+    whose single most-recent-ever visit happens to fall in July.
+
+    Output has the same shape summarize_children() expects (is_stunted,
+    is_severe, ever_stunted columns), so it's a drop-in replacement for
+    filter_by_date(get_child_df(), ...) wherever a date range is applied.
+    """
+    if visits is None or visits.empty:
+        return pd.DataFrame()
+
+    v = visits
+    if start:
+        try:
+            v = v[v["immunization_date"] >= pd.Timestamp(start)]
+        except Exception:
+            pass
+    if end:
+        try:
+            v = v[v["immunization_date"] <= pd.Timestamp(end)]
+        except Exception:
+            pass
+    if v.empty:
+        return pd.DataFrame()
+
+    tei = "tracked_entity_instance"
+    ever = v.groupby(tei)["is_stunted"].max()
+    _sort_cols = ["immunization_date", "event_id"] if "event_id" in v.columns else ["immunization_date"]
+    latest = (v.sort_values(_sort_cols)
+               .drop_duplicates(subset=[tei], keep="last")
+               .set_index(tei))
+    latest["ever_stunted"] = ever.reindex(latest.index)
+    # missed-dose / at-risk flags are current-state concepts (computed from a
+    # child's overall latest visit + full growth history), not period-scoped —
+    # they aren't shown in the KPI cards that use this, so left False here.
+    latest["missed"]      = False
+    latest["under_risk"]  = False
+    return latest.reset_index()
+
+
+# A range this wide behaves identically whether a child is deduped by "latest
+# visit ever" (cheap — the pre-collapsed child table) or "latest visit within
+# the range" (build_period_child_df, correct in general but expensive — it
+# re-derives from millions of visit rows). The two only diverge for genuinely
+# narrow windows (e.g. one month), which is exactly what build_period_child_df
+# exists for. Below this threshold we're clearly looking at a specific period;
+# at or above it, treat it the same as "no filter" and use the cheap path —
+# this matters because the dashboard's own default date range spans the
+# entire dataset, so without this the expensive path would run on every
+# single page load, not just when someone narrows to a specific month.
+_NARROW_RANGE_DAYS = 180
+
+
+def scoped_child_df(child: pd.DataFrame | None, visits: pd.DataFrame | None,
+                    user: dict, province=None, district=None, hospital=None,
+                    start: str | None = None, end: str | None = None) -> pd.DataFrame:
+    """One-stop, correctly-and-cheaply-scoped per-child view for the dashboard.
+
+    Picks build_period_child_df() (correct, more expensive) for a narrow date
+    window, or the pre-collapsed child table (cheap) for a wide/default one —
+    see _NARROW_RANGE_DAYS. Applies user/geo filters to whichever it picks.
+    """
+    narrow = False
+    if start and end:
+        try:
+            narrow = (pd.Timestamp(end) - pd.Timestamp(start)).days < _NARROW_RANGE_DAYS
+        except Exception:
+            narrow = False
+
+    if narrow and visits is not None:
+        v = filter_by_user(visits, user)
+        v = filter_geo(v, province, district, hospital)
+        return build_period_child_df(v, start, end)
+
+    c = child if child is not None else pd.DataFrame()
+    c = filter_by_user(c, user)
+    c = filter_geo(c, province, district, hospital)
+    return c
 
 
 def summarize_children(child: pd.DataFrame) -> dict:

@@ -177,6 +177,31 @@ Open in browser: **`http://SERVER_IP/rsss_app/`**
 
 ---
 
+### Step 7 — Schedule the child-level cache build (recommended)
+
+The dashboard's KPI cards and Overview tab depend on a heavy WHO-stunting
+computation across every child's full visit history (~2 minutes, CPU-bound).
+By default the app will build this itself in the background the first time
+it's needed — but that means the first visitor after every restart waits,
+and the build competes with live requests for CPU. Running it on a schedule
+instead means the app only ever *reads* an already-built result:
+
+```bash
+sudo -u rsss crontab -e
+```
+
+Add (every 20 minutes — adjust to taste):
+```
+*/20 * * * * cd /opt/rsss_app && /opt/rsss_app/.venv/bin/python -m tools.build_child_cache >> /opt/rsss_app/logs/child_cache.log 2>&1
+```
+
+Run it once by hand first so the dashboard has data immediately:
+```bash
+sudo -u rsss /opt/rsss_app/.venv/bin/python -m tools.build_child_cache
+```
+
+---
+
 ## Deploying Updates (day-to-day)
 
 Edit `deploy/deploy.sh` — set `SERVER_HOST` and `SERVER_USER`, then:

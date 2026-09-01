@@ -1,0 +1,109 @@
+{
+  "recipients": [
+    {
+      "name": "Sandra Ingabire",
+      "email": "sandra.ingabire@rbc.gov.rw",
+      "organization": "NCDA",
+      "title": "",
+      "active": true
+    },
+    {
+      "name": "Henry Cyemezo",
+      "email": "henry.cyemezo@ncda.gov.rw",
+      "organization": "NCDA",
+      "title": "",
+      "active": true
+    },
+    {
+      "name": "SANDRA",
+      "email": "sandra.ingabire@rbc.gov.rw",
+      "organization": "NCDA",
+      "title": "",
+      "active": true
+    },
+    {
+      "name": "Dr Eric Remera",
+      "email": "eric.remera@rbc.gov.rw",
+      "organization": "RBC",
+      "title": "Dr",
+      "active": true
+    },
+    {
+      "name": "Aline Uwimana",
+      "email": "aline.uwimana@rbc.gov.rw",
+      "organization": "RBC",
+      "title": "",
+      "active": true
+    },
+    {
+      "name": "Emery Hezagira",
+      "email": "emery.hezagira@rbc.gov.rw",
+      "organization": "RBC",
+      "title": "",
+      "active": true
+    },
+    {
+      "name": "Asifiwe Ruth",
+      "email": "ruth.asifiwe@rbc.gov.rw",
+      "organization": "RBC",
+      "title": "",
+      "active": true
+    },
+    {
+      "name": "Justin Ntaganda",
+      "email": "justin.ntaganda@rbc.gov.rw",
+      "organization": "RBC",
+      "title": "",
+      "active": true
+    },
+    {
+      "name": "Jeanne Umuhire",
+      "email": "jeanne.umuhire@rbc.gov.rw",
+      "organization": "RBC",
+      "title": "",
+      "active": true
+    },
+    {
+      "name": "oreste tuganeyezu",
+      "email": "oreste.tuganeyezu@moh.gov.rw",
+      "organization": "MOH",
+      "title": "",
+      "active": true
+    },
+    {
+      "name": "Jean baptiste ntihumbya",
+      "email": "jeanbaptiste.ntihumbya@moh.gov.rw",
+      "organization": "MOH",
+      "title": "",
+      "active": true
+    },
+    {
+      "name": "Dr. Albert Tuyishime",
+      "email": "albert.tuyishime@rbc.gov.rw",
+      "organization": "RBC",
+      "title": "",
+      "active": true
+    },
+    {
+      "name": "Francois Regis Cyiza",
+      "email": "francoisregis.cyiza@rbc.gov.rw",
+      "organization": "RBC",
+      "title": "",
+      "active": true
+    },
+    {
+      "name": "Daniel Nsanzabandi",
+      "email": "danielnsanzabandi@gmail.com",
+      "organization": "RBC",
+      "title": "",
+      "active": true
+    }
+  ],
+  "metadata": {
+    "last_updated": "2025-12-01",
+    "updated_by": "Daniel Nsanzabandi",
+    "version": "1.0",
+    "total_recipients": 12,
+    "notes": "National summary report recipients from NCDA and RBC. Set 'active' to false to temporarily exclude a recipient."
+  }
+}

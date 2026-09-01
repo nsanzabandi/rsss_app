@@ -22,6 +22,7 @@ DATA_BACKEND = os.environ.get("DATA_BACKEND", "local").strip().lower()
 _SCHEMAS: dict[str, dict] = {
     "local": {
         "table":        "immunization_vaccination",
+        "event_id":     "event_id",
         "tei":          "entity_id",
         "gender":       "gender",
         "age":          "age_visit_months",

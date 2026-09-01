@@ -122,6 +122,11 @@ def layout(user: dict) -> html.Div:
                         id="rpt-dry-run",
                         options=[{"label": " Dry-run (redirect all to test address)", "value": "dry"}],
                         value=["dry"], inline=True), width="auto"),
+                    dbc.Col(dbc.Checklist(
+                        id="rpt-send-overview",
+                        options=[{"label": " Also send National Overview PDF to senior officials",
+                                  "value": "overview"}],
+                        value=[], inline=True), width="auto"),
                 ], className="g-3"),
             ], style={"display": "block" if can_email else "none"}, className="mb-3"),
 
@@ -204,9 +209,10 @@ def register_callbacks(app) -> None:
         State("rpt-year",           "value"),
         State("rpt-send-email",     "value"),
         State("rpt-dry-run",        "value"),
+        State("rpt-send-overview",  "value"),
         prevent_initial_call=True,
     )
-    def _start(n, rtype, targets, month, year, email_chk, dry_chk):
+    def _start(n, rtype, targets, month, year, email_chk, dry_chk, overview_chk):
         from flask import session
         import jobs
         user = session.get("user")
@@ -217,10 +223,12 @@ def register_callbacks(app) -> None:
         who = user.get("username", "unknown")
         if rtype == "hospital":
             jid = jobs.start_hospital_job(targets, month, year, bool(email_chk),
-                                          who, dry_run=bool(dry_chk))
+                                          who, dry_run=bool(dry_chk),
+                                          send_overview=bool(overview_chk))
         else:
             jid = jobs.start_facility_job(targets, month, year, bool(email_chk),
-                                          who, dry_run=bool(dry_chk))
+                                          who, dry_run=bool(dry_chk),
+                                          send_overview=bool(overview_chk))
         prog = html.Div([
             html.Div(f"Job started — {len(targets)} {rtype}(s)…",
                      className="text-muted mb-2", style={"fontSize": "0.83rem"}),

@@ -41,8 +41,8 @@ class NationalSummaryAnalytics:
         bands = {
             "0–6 months":   int((ages < 6).sum()),
             "6–12 months":  int(((ages >= 6)  & (ages < 12)).sum()),
-            "12–24 months": int(((ages >= 12) & (ages < 24)).sum()),
-            "24+ months":   int((ages >= 24).sum()),
+            "12–15 months": int(((ages >= 12) & (ages < 15)).sum()),
+            "15+ months":   int((ages >= 15).sum()),
         }
 
         return {
@@ -89,6 +89,29 @@ class NationalSummaryAnalytics:
             }
             for p, n in prov.items()
         }
+
+    def get_district_summary(self, all_df: pd.DataFrame, stunted_df: pd.DataFrame) -> list[dict]:
+        """
+        Per-district breakdown for ALL districts (not just a top-N chart) —
+        district, vaccinated (n), stunted, prevalence % — same methodology
+        as the dashboard's Geographic Hotspots chart, sorted worst-first.
+        """
+        if "district" not in all_df.columns:
+            return []
+        vacc = self._unique(all_df[all_df["district"].notna()]).groupby("district").size()
+        stu  = (self._unique(stunted_df[stunted_df["district"].notna()]).groupby("district").size()
+               if stunted_df is not None and not stunted_df.empty and "district" in stunted_df.columns
+               else pd.Series(dtype=int))
+        rows = []
+        for district, n in vacc.items():
+            s = int(stu.get(district, 0))
+            rows.append({
+                "district": str(district),
+                "n":        int(n),
+                "stunted":  s,
+                "rate":     round(s / n * 100, 1) if n else 0,
+            })
+        return sorted(rows, key=lambda r: r["rate"], reverse=True)
 
     def get_hospital_summary(self, all_hospitals_data: dict) -> list[dict]:
         """

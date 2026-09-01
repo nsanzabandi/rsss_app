@@ -20,6 +20,7 @@ from components.kpi import (
 from data import (
     district_options, filter_by_date, filter_by_user, filter_geo,
     get_all_df, get_df, hospital_options, nuniq, province_options,
+    monthly_rate as _month_rate,   # shared with core/report_generator.py's trend chart
 )
 
 _H    = 340
@@ -203,17 +204,18 @@ def register_callbacks(app) -> None:
         user = session.get("user")
         if not user:
             return [kpi_placeholder() for _ in range(8)], True
-        from data import (get_child_df, warm_child_level, child_build_status,
-                          filter_by_user, filter_geo, filter_by_date, summarize_children)
-        child = get_child_df()
-        if child is None:
+        from data import (get_child_df, get_visits_df, warm_child_level,
+                          child_build_status, scoped_child_df, summarize_children)
+        child  = get_child_df()
+        visits = get_visits_df()
+        if child is None or visits is None:
             warm_child_level()                            # ensure it's running
             keep_polling = child_build_status() != "error"
             return [kpi_placeholder() for _ in range(8)], (not keep_polling)
-        # filter the cached per-child table — instant
-        c = filter_by_user(child, user)
-        c = filter_geo(c, province, district, hospital)
-        c = filter_by_date(c, start, end)
+        # Cheap for the default/wide range; only re-derives from raw visits
+        # (correctly, per-period) when the date range is narrow — see
+        # scoped_child_df's docstring.
+        c = scoped_child_df(child, visits, user, province, district, hospital, start, end)
         return _national_cards(summarize_children(c)), True
 
     @app.callback(
@@ -241,14 +243,14 @@ def register_callbacks(app) -> None:
         # trend), filtered identically. These reflect the WHO-computed stunting
         # so the charts match the KPI cards.
         if tab == "overview":
-            from data import get_child_df, get_monthly_df, get_schedule_df
-            child    = get_child_df()
-            monthly  = get_monthly_df()
-            schedule = get_schedule_df()
-            if child is not None and not child.empty:
-                child = filter_by_user(child, user)
-                child = filter_geo(child, province, district, hospital)
-                child = filter_by_date(child, start, end)
+            from data import get_child_df, get_visits_df, get_monthly_df, get_schedule_df, scoped_child_df
+            child_raw = get_child_df()
+            visits    = get_visits_df()
+            monthly   = get_monthly_df()
+            schedule  = get_schedule_df()
+            child = pd.DataFrame()
+            if child_raw is not None and not child_raw.empty:
+                child = scoped_child_df(child_raw, visits, user, province, district, hospital, start, end)
             if monthly is not None and not monthly.empty:
                 monthly = filter_geo(monthly, province, district, hospital)
             if schedule is not None and not schedule.empty:
@@ -334,33 +336,6 @@ def _coverage_table(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def _month_rate(monthly: pd.DataFrame, start, end, value: str) -> pd.DataFrame:
-    """Collapse the monthly×geo table to a national-or-filtered monthly series,
-    dropping future and thin (low-denominator) months that make the line spike."""
-    m = (monthly.groupby("month")
-                .agg(measured=("measured", "sum"),
-                     stunted=("stunted", "sum"),
-                     severe=("severe", "sum"))
-                .reset_index())
-    if start:
-        m = m[m["month"] >= pd.Timestamp(start)]
-    if end:
-        m = m[m["month"] <= pd.Timestamp(end)]
-    if m.empty:
-        return m
-    # Drop sparse/partial months relative to a typical busy month, so the line
-    # isn't dragged by the current partial month or future-dated stragglers.
-    busy = m["measured"].quantile(0.75)
-    thresh = max(100, 0.30 * busy)
-    m = m[m["measured"] >= thresh].copy()
-    if value == "rate":
-        m["y"] = (m["stunted"] / m["measured"] * 100).round(1)
-    else:  # severe share of stunted
-        m = m[m["stunted"] > 0]
-        m["y"] = (m["severe"] / m["stunted"] * 100).round(1)
-    return m
-
-
 def _sched_sort_key(value) -> tuple:
     """Robustly order EPI visits regardless of casing/spacing/spelling:
     At Birth → weeks (by number) → months (by number) → years.
@@ -406,6 +381,13 @@ def _overview(df: pd.DataFrame, child=None, monthly=None, schedule=None,
             fig_rate.update_layout(margin=dict(l=48, r=40, t=48, b=40))
             fig_rate.update_yaxes(range=[0, max(float(m["y"].max()) * 1.28, 5)])
             fig_rate.update_xaxes(automargin=True)
+            if len(m) == 1:
+                # A single point on a date axis auto-ranges to a sub-second
+                # window (Plotly picks a default span around one timestamp) —
+                # pin a sensible +/-15 day window around it instead.
+                mid = m["month"].iloc[0]
+                fig_rate.update_xaxes(range=[mid - pd.Timedelta(days=15),
+                                             mid + pd.Timedelta(days=15)])
 
     # ── 2. Geographic hotspots by PREVALENCE rate (computed) ──────────────────
     fig_hot = _empty(building if not have_child else "No district data")
@@ -414,7 +396,16 @@ def _overview(df: pd.DataFrame, child=None, monthly=None, schedule=None,
                   .assign(_s=child["is_stunted"].eq(True))
                   .groupby("district")
                   .agg(n=("_s", "size"), stunted=("_s", "sum")).reset_index())
-        g = g[g["n"] >= 50]
+        # A "min 50 per district" noise floor makes sense for the default
+        # all-time view, but can exceed the entire scoped population for a
+        # narrow date range — scale it down there instead of hiding the chart.
+        narrow_range = False
+        if start and end:
+            try:
+                narrow_range = (pd.Timestamp(end) - pd.Timestamp(start)).days < 180
+            except Exception:
+                narrow_range = False
+        g = g[g["n"] >= (3 if narrow_range else 50)]
         g["rate"] = (g["stunted"] / g["n"] * 100).round(1)
         g = g.sort_values("rate").tail(15)
         if not g.empty:
@@ -457,6 +448,10 @@ def _overview(df: pd.DataFrame, child=None, monthly=None, schedule=None,
             fig_sevtrend.update_layout(**_base(height=_H, yaxis_title="Severe %", xaxis_title=""))
             fig_sevtrend.update_layout(margin=dict(l=48, r=40, t=48, b=40))
             fig_sevtrend.update_yaxes(range=[0, max(float(ms["y"].max()) * 1.28, 5)])
+            if len(ms) == 1:
+                mid = ms["month"].iloc[0]
+                fig_sevtrend.update_xaxes(range=[mid - pd.Timedelta(days=15),
+                                                 mid + pd.Timedelta(days=15)])
 
     # ── 3b. Stunting by immunization schedule (EPI visit) ─────────────────────
     fig_sched = _empty(building if not have_sched else "No schedule data")

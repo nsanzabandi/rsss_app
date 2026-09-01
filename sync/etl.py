@@ -87,10 +87,6 @@ _sync_jobs: dict[str, dict] = {}
 _sync_lock = threading.Lock()
 
 _print_lock = threading.Lock()
-
-# Serialize DB writes across worker threads. Fetching (the slow part) stays
-# parallel, but concurrent INSERT … ON CONFLICT into the same table deadlocks
-# on the event_id index, so only one thread writes at a time.
 _db_write_lock = threading.Lock()
 
 
@@ -176,11 +172,105 @@ def create_table() -> None:
         CREATE INDEX IF NOT EXISTS idx_iv_imm_date     ON immunization_vaccination(last_immunization_date);
         CREATE INDEX IF NOT EXISTS idx_iv_stunting     ON immunization_vaccination(stunting_status);
         CREATE INDEX IF NOT EXISTS idx_iv_dob          ON immunization_vaccination(date_of_birth);
+
+        -- Tracks per-page fetch progress for each (district, month-chunk) window
+        -- of a fixed-window sync (initial / range / month). Lets a restarted
+        -- sync resume from the next page instead of re-fetching a whole chunk
+        -- (or whole district) from scratch. Not used by incremental ("sync")
+        -- mode, whose per-district window already self-advances via
+        -- last_updated_on.
+        CREATE TABLE IF NOT EXISTS sync_progress (
+            mode          TEXT NOT NULL,
+            req_start     TEXT NOT NULL,
+            req_end       TEXT NOT NULL,
+            district      TEXT NOT NULL,
+            chunk_start   TEXT NOT NULL,
+            chunk_end     TEXT NOT NULL,
+            last_page     INTEGER NOT NULL DEFAULT 0,
+            done          BOOLEAN NOT NULL DEFAULT TRUE,
+            updated_at    TIMESTAMP DEFAULT NOW(),
+            PRIMARY KEY (mode, req_start, req_end, district, chunk_start, chunk_end)
+        );
+        -- Upgrade path for installs that already have the table from before
+        -- page-level tracking was added.
+        ALTER TABLE sync_progress ADD COLUMN IF NOT EXISTS last_page  INTEGER   NOT NULL DEFAULT 0;
+        ALTER TABLE sync_progress ADD COLUMN IF NOT EXISTS done       BOOLEAN   NOT NULL DEFAULT TRUE;
+        ALTER TABLE sync_progress ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT NOW();
     """)
     conn.commit()
     cur.close()
     conn.close()
     _log("Table ready")
+
+
+# ── Resume tracking (fixed-window syncs: initial / range / month) ──────────────
+# resume_key identifies "this exact requested sync" so a restart with the same
+# parameters resumes instead of re-fetching everything. Format: (mode, req_start, req_end).
+
+def _chunk_progress(resume_key: tuple[str, str, str] | None,
+                    district_name: str, chunk_start: str, chunk_end: str) -> tuple[bool, int]:
+    """Return (done, last_page_fetched) for this chunk. (False, 0) if never started."""
+    if resume_key is None:
+        return False, 0
+    mode, req_start, req_end = resume_key
+    try:
+        conn = _get_conn()
+        cur  = conn.cursor()
+        cur.execute(
+            "SELECT done, last_page FROM sync_progress WHERE mode=%s AND req_start=%s "
+            "AND req_end=%s AND district=%s AND chunk_start=%s AND chunk_end=%s",
+            (mode, req_start, req_end, district_name, chunk_start, chunk_end),
+        )
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        if row is None:
+            return False, 0
+        return bool(row[0]), int(row[1])
+    except Exception:
+        return False, 0
+
+
+def _save_chunk_progress(resume_key: tuple[str, str, str] | None,
+                         district_name: str, chunk_start: str, chunk_end: str,
+                         last_page: int, done: bool) -> None:
+    if resume_key is None:
+        return
+    mode, req_start, req_end = resume_key
+    try:
+        conn = _get_conn()
+        cur  = conn.cursor()
+        cur.execute(
+            "INSERT INTO sync_progress "
+            "(mode, req_start, req_end, district, chunk_start, chunk_end, last_page, done, updated_at) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,NOW()) "
+            "ON CONFLICT (mode, req_start, req_end, district, chunk_start, chunk_end) "
+            "DO UPDATE SET last_page = EXCLUDED.last_page, done = EXCLUDED.done, "
+            "updated_at = NOW()",
+            (mode, req_start, req_end, district_name, chunk_start, chunk_end, last_page, done),
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as exc:
+        _log(f"  [resume] could not record progress for {district_name} "
+             f"{chunk_start}→{chunk_end}: {exc}")
+
+
+def clear_sync_progress(mode: str, req_start: str, req_end: str) -> int:
+    """Forget resume progress for a given fixed-window sync, forcing the next
+    run of that exact window to re-fetch every district from scratch."""
+    conn = _get_conn()
+    cur  = conn.cursor()
+    cur.execute(
+        "DELETE FROM sync_progress WHERE mode=%s AND req_start=%s AND req_end=%s",
+        (mode, req_start, req_end),
+    )
+    deleted = cur.rowcount
+    conn.commit()
+    cur.close()
+    conn.close()
+    return deleted
 
 
 def _parse_hierarchy(hierarchy_str) -> dict:
@@ -378,13 +468,25 @@ def _fetch_district(
     start_date: str,
     end_date: str,
     progress_cb=None,   # optional callable(district_name, rows_so_far)
+    resume_key: tuple[str, str, str] | None = None,
 ) -> tuple[str, int]:
-    session       = _make_session()
-    total_fetched = 0
-    chunks        = _month_chunks(start_date, end_date)
+    session          = _make_session()
+    total_fetched    = 0
+    all_chunks_done  = True   # stays True only if every chunk was skip-resumed
+    chunks           = _month_chunks(start_date, end_date)
 
     for chunk_start, chunk_end in chunks:
-        page = 1
+        done, last_page = _chunk_progress(resume_key, district_name, chunk_start, chunk_end)
+        if done:
+            _log(f"  {district_name} [{chunk_start}] — already synced, skipping")
+            continue
+        all_chunks_done = False
+
+        page = last_page + 1 if last_page else 1
+        if last_page:
+            _log(f"  {district_name} [{chunk_start}] — resuming from page {page} "
+                 f"(page {last_page} already fetched)")
+        chunk_ok = False   # only mark the chunk done on a clean finish, not an HTTP error
         while True:
             try:
                 resp = session.get(
@@ -411,6 +513,7 @@ def _fetch_district(
                 headers = [h["column"] for h in data.get("headers", [])]
                 rows    = data.get("rows", [])
                 if not rows:
+                    chunk_ok = True   # legitimately no data for this window
                     break
 
                 df = pd.DataFrame(rows, columns=headers)
@@ -424,7 +527,13 @@ def _fetch_district(
                 _log(f"  {district_name} [{chunk_start}] p{page}/{total_pages} "
                      f"— {total_fetched:,} rows")
 
+                # Persist after every successful page — a crash on page N+1
+                # resumes at N+1, not from page 1 of the whole chunk.
+                _save_chunk_progress(resume_key, district_name, chunk_start, chunk_end,
+                                     last_page=page, done=False)
+
                 if page >= total_pages:
+                    chunk_ok = True   # all pages for this chunk fetched successfully
                     break
                 page += 1
                 time.sleep(0.1)
@@ -438,7 +547,17 @@ def _fetch_district(
                 time.sleep(20)
                 session = _make_session()
 
-    _log(f"  {district_name} DONE — {total_fetched:,} rows")
+        # Record this chunk as done only on a clean finish — an HTTP-error break
+        # leaves it as "in progress at page N" (already saved above), so a
+        # resumed run continues from page N+1 rather than the whole chunk.
+        if chunk_ok:
+            _save_chunk_progress(resume_key, district_name, chunk_start, chunk_end,
+                                 last_page=page, done=True)
+
+    if all_chunks_done and resume_key is not None:
+        _log(f"  {district_name} DONE — already up to date (all chunks previously synced)")
+    else:
+        _log(f"  {district_name} DONE — {total_fetched:,} rows")
     return district_name, total_fetched
 
 
@@ -450,14 +569,22 @@ def _today() -> str:
 
 def run_initial_load(start_date: str = "2025-07-01",
                      end_date:   str | None = None,
-                     workers: int = 3) -> dict:
-    """Full load for all 30 districts. Runs synchronously (call in a thread)."""
+                     workers: int = 3,
+                     resume: bool = True) -> dict:
+    """Full load for all 30 districts. Runs synchronously (call in a thread).
+
+    resume=True (default): if this exact date range was previously interrupted,
+    districts/month-chunks already fully fetched are skipped. Pass resume=False
+    to force a complete re-fetch, ignoring any prior progress for this range.
+    """
     end_date = end_date or _today()
     create_table()
+    resume_key = ("initial", start_date, end_date) if resume else None
     totals: dict[str, int] = {}
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futures = {
-            ex.submit(_fetch_district, did, dname, start_date, end_date): dname
+            ex.submit(_fetch_district, did, dname, start_date, end_date,
+                     None, resume_key): dname
             for did, dname in DISTRICTS.items()
         }
         for future in as_completed(futures):
@@ -466,12 +593,16 @@ def run_initial_load(start_date: str = "2025-07-01",
     return totals
 
 
-def run_month_load(year: int, month: int, workers: int = 3) -> dict:
+def run_month_load(year: int, month: int, workers: int = 3,
+                   resume: bool = True) -> dict:
     """
     (Re)fetch a single calendar month for ALL districts — e.g. run_month_load(2026, 6)
     to backfill June. Idempotent: rows upsert on event_id, so already-fetched
     events are updated in place, never duplicated. Use this when a month was
     missed (e.g. eTracker analytics weren't ready yet during the incremental sync).
+
+    resume=True (default): if this exact month load was previously interrupted,
+    districts already fully fetched are skipped rather than re-fetched.
     """
     from calendar import monthrange
     create_table()
@@ -479,10 +610,12 @@ def run_month_load(year: int, month: int, workers: int = 3) -> dict:
     last  = monthrange(year, month)[1]
     end   = f"{year:04d}-{month:02d}-{last:02d}"
     _log(f"Month load {start} → {end} (all districts)")
+    resume_key = ("month", start, end) if resume else None
     totals: dict[str, int] = {}
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futures = {
-            ex.submit(_fetch_district, did, dname, start, end): dname
+            ex.submit(_fetch_district, did, dname, start, end,
+                     None, resume_key): dname
             for did, dname in DISTRICTS.items()
         }
         for future in as_completed(futures):
@@ -513,12 +646,19 @@ def run_incremental_sync(workers: int = 3) -> dict:
 
 def start_sync_job(mode: str = "sync",
                    start_date: str | None = None,
-                   end_date: str | None = None) -> str:
+                   end_date: str | None = None,
+                   resume: bool = True) -> str:
     """
     Launch a background sync thread and return a job ID.
     Poll with get_sync_job(jid) to track progress.
     mode: "initial" | "sync" | "range"
       • range → fetch a custom start_date..end_date window for all districts.
+
+    resume=True (default): for "initial"/"range" (a fixed window shared by every
+    district), if this exact window was previously interrupted, districts/chunks
+    already fully fetched are skipped instead of re-fetched from scratch. Has no
+    effect on "sync" mode, whose per-district window already self-advances via
+    last_updated_on. Pass resume=False to force a full re-fetch of this window.
     """
     jid = str(uuid.uuid4())[:8]
     with _sync_lock:
@@ -548,12 +688,19 @@ def start_sync_job(mode: str = "sync",
                     return (start_date or "2025-07-01"), (end_date or _today())
                 return _get_last_updated(dname), _today()
 
+            # Fixed-window modes (initial/range) share the same requested window
+            # across every district, so resume tracking applies. "sync" mode's
+            # window differs per district (from last_updated_on) and is already
+            # naturally incremental — no resume_key needed there.
+            resume_key = (mode, *_window(None)) if resume and mode in ("initial", "range") else None
+
             results: dict[str, int] = {}
             with ThreadPoolExecutor(max_workers=3) as ex:
                 futures = {}
                 for did, dname in DISTRICTS.items():
                     s, e = _window(dname)
-                    futures[ex.submit(_fetch_district, did, dname, s, e, _cb)] = dname
+                    futures[ex.submit(_fetch_district, did, dname, s, e,
+                                      _cb, resume_key)] = dname
                 for future in as_completed(futures):
                     name, count = future.result()
                     results[name] = count

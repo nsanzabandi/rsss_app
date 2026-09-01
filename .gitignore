@@ -1,6 +1,10 @@
 # ── Secrets & Environment ──────────────────────────────────────────────────────
 .env
 
+# ── Large data files (populated by sync/etl.py — belongs in the DB, not git) ──
+data/
+*.csv
+
 # ── Python ─────────────────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]

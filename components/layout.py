@@ -61,6 +61,7 @@ def _sidebar(user: dict | None = None) -> html.Div:
     nav_items += [
         _nav_link("Follow-Up", "/rsss_app/followup", "bi-clipboard2-pulse"),
         _nav_link("At-Risk",   "/rsss_app/risk",     "bi-exclamation-triangle-fill"),
+        _nav_link("eBuzima Nutrition", "/rsss_app/ebuzima", "bi-clipboard2-data"),
     ]
 
     if role == "ministry" and not readonly:
