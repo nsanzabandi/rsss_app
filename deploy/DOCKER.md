@@ -13,7 +13,11 @@ nginx (host port 80) → app (gunicorn, port 8050) → db (postgres:16, immuniza
 ```
 
 The eBuzima module's ClickHouse mirror (`197.243.95.44`) and the eTracker/DHIS2 API are external
-services — nothing to install for those, just credentials in `.env`.
+services — nothing to install for those, just credentials in `.env`. **eBuzima itself is deferred**
+— get core RSSS running first, add eBuzima as a separate fast-follow (see the note at the end).
+
+This VM only reaches the internet through a **Squid proxy** at `http://192.168.122.1:3899`. Login
+shells and `apt` are already configured for it, but Docker is not — Step 1 covers that.
 
 ---
 
@@ -31,6 +35,51 @@ sudo usermod -aG docker danny
 newgrp docker   # or log out/in so group membership takes effect
 docker compose version   # sanity check
 ```
+
+### Configure the Squid proxy for Docker
+
+Login shells already have `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` set (see `/etc/environment`), but
+the Docker **daemon** and **containers** each need it configured separately.
+
+Daemon (so it can pull `python:3.11-slim`, `postgres:16-alpine`, `nginx:alpine` from Docker Hub):
+```bash
+sudo mkdir -p /etc/systemd/system/docker.service.d
+sudo tee /etc/systemd/system/docker.service.d/http-proxy.conf > /dev/null <<'EOF'
+[Service]
+Environment="HTTP_PROXY=http://192.168.122.1:3899"
+Environment="HTTPS_PROXY=http://192.168.122.1:3899"
+Environment="NO_PROXY=localhost,127.0.0.1,192.168.122.0/24,10.5.161.0/23"
+EOF
+sudo systemctl daemon-reload
+sudo systemctl restart docker
+```
+
+CLI build-arg + container-env auto-injection (covers `apt-get`/`pip install` during
+`docker compose build`, and gives every container the same proxy env automatically):
+```bash
+mkdir -p ~/.docker
+cat > ~/.docker/config.json <<'EOF'
+{
+  "proxies": {
+    "default": {
+      "httpProxy": "http://192.168.122.1:3899",
+      "httpsProxy": "http://192.168.122.1:3899",
+      "noProxy": "localhost,127.0.0.1,192.168.122.0/24,10.5.161.0/23,db,app,nginx"
+    }
+  }
+}
+EOF
+```
+
+> **Known caveat:** Squid is an HTTP(S) proxy. `requests`/`curl`/`pip` respect
+> `HTTP_PROXY`/`HTTPS_PROXY` and work through it — but **report emails use raw SMTP**
+> (`smtplib` → `smtp.gmail.com:587`), which ignores those env vars entirely and opens a direct TCP
+> socket. Check this now, before assuming email works:
+> ```bash
+> nc -zv smtp.gmail.com 587 -w 5
+> ```
+> If it times out, message Joel — that port/destination needs its own egress allowance (or Squid
+> `CONNECT` support for 587); it's a separate issue from the proxy setup above.
 
 Clone the repo:
 ```bash
@@ -59,13 +108,14 @@ Fill in, at minimum:
 | `LOCAL_DB_USER` / `LOCAL_DB_PASSWORD` / `LOCAL_DB_NAME` | pick real values — these seed the Postgres container on first boot |
 | `EMAIL_USER` / `EMAIL_PASSWORD` | Gmail + App Password |
 | `ETRACKER_USER` / `ETRACKER_PASSWORD` | eTracker (DHIS2) credentials |
-| `EBUZIMA_DB_HOST` | `db` |
-| `EBUZIMA_DB_USER` / `EBUZIMA_DB_PASSWORD` / `EBUZIMA_DB_NAME` | pick real values — a **separate** DB from `LOCAL_DB_*`, seeded by `deploy/postgres-init/01-ebuzima-db.sh` on first boot |
-| `EBUZIMA_CLICKHOUSE_PASSWORD` | password for the external ClickHouse mirror at `197.243.95.44` |
-| `EBUZIMA_API_KEY` / `EBUZIMA_API_SECRET` | only if the Frappe REST fallback is used |
+| `HTTP_PROXY` / `HTTPS_PROXY` | `http://192.168.122.1:3899` |
+| `NO_PROXY` | `localhost,127.0.0.1,192.168.122.0/24,10.5.161.0/23,db,app,nginx` |
+| `http_proxy` / `https_proxy` / `no_proxy` | same three values, lowercase — some libraries only check lowercase |
+| `EBUZIMA_DB_*` | leave **blank** for now — eBuzima is a fast-follow, see the end of this guide |
 
-> `LOCAL_DB_HOST`/`EBUZIMA_DB_HOST` **must** be `db` (the compose service name) — the app container
-> reaches Postgres over the internal Docker network, not `localhost`.
+> `LOCAL_DB_HOST` **must** be `db` (the compose service name) — the app container reaches Postgres
+> over the internal Docker network, not `localhost`. `NO_PROXY` excludes the compose service names
+> (`db`/`app`/`nginx`) so container-to-container traffic never gets routed through Squid.
 
 Build and start everything:
 ```bash
@@ -92,9 +142,6 @@ Build the child-level stunting cache once by hand so the dashboard has data imme
 ```bash
 docker compose exec app python -m tools.build_child_cache
 ```
-
-If eBuzima credentials are filled in, open the eBuzima page in the browser once logged in and use
-its manual "Sync" button to pull the first batch from ClickHouse/Frappe.
 
 ---
 
@@ -175,6 +222,26 @@ Deferred until a domain is pointed at this server. Then either:
 - [ ] `SECRET_KEY` is a random 32+ hex string (not the example default)
 - [ ] `DEBUG=false` in `.env`
 - [ ] `.env` is not committed to git (already covered by `.gitignore`)
-- [ ] `LOCAL_DB_PASSWORD` / `EBUZIMA_DB_PASSWORD` are strong, unique passwords
+- [ ] `LOCAL_DB_PASSWORD` is a strong, unique password
 - [ ] Only port 80 (and SSH) is open in `ufw`
 - [ ] GitHub repo access uses a deploy key or PAT scoped to this repo
+
+---
+
+## eBuzima (fast-follow, once core RSSS is confirmed stable)
+
+1. Fill in `EBUZIMA_DB_HOST=db`, `EBUZIMA_DB_USER`/`EBUZIMA_DB_PASSWORD`/`EBUZIMA_DB_NAME` (a
+   **separate** database from `LOCAL_DB_*`), and `EBUZIMA_CLICKHOUSE_PASSWORD` (+ `EBUZIMA_API_KEY`/
+   `EBUZIMA_API_SECRET` if the Frappe REST fallback is needed) in `.env`.
+2. `deploy/postgres-init/01-ebuzima-db.sh` only runs automatically the **first** time the `db`
+   volume initializes. Since `db` will already have data from the core cutover, create the
+   eBuzima role/database by hand instead:
+   ```bash
+   docker compose exec db psql -U <LOCAL_DB_USER> -d postgres -c \
+     "CREATE ROLE <EBUZIMA_DB_USER> LOGIN PASSWORD '<EBUZIMA_DB_PASSWORD>';"
+   docker compose exec db psql -U <LOCAL_DB_USER> -d postgres -c \
+     "CREATE DATABASE <EBUZIMA_DB_NAME> OWNER <EBUZIMA_DB_USER>;"
+   ```
+3. `docker compose up -d app` (restart so it picks up the new env vars).
+4. Log in, open the eBuzima page, and use its manual "Sync" button to pull the first batch from
+   ClickHouse/Frappe. Watch `docker compose logs -f app` for connection errors.
