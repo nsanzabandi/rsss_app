@@ -64,64 +64,69 @@ def layout(user: dict) -> html.Div:
     except Exception:
         pass
 
-    df     = get_df()
-    df_u   = filter_by_user(df, user) if df is not None else pd.DataFrame()
+    # Filter options + earliest date come from the in-memory per-child table —
+    # NOT get_df(), which reads ~0.5M rows from the database (~14s) and used to
+    # block the page from opening. get_df() is only a fallback on a cold start.
+    from data import get_child_df, get_visits_df
+    src = get_child_df()
+    if src is None:
+        src = get_df()
+    df_u   = filter_by_user(src, user) if src is not None else pd.DataFrame()
     role   = user.get("role", "")
     locked = role in ("hospital", "health_center")
 
     d_end   = datetime.today().strftime("%Y-%m-%d")
-    # Default to showing all data since 2020 — date filter uses actual data range
-    d_start = (
-        df_u["immunization_date"].min().strftime("%Y-%m-%d")
-        if df_u is not None and not df_u.empty
-           and "immunization_date" in df_u.columns
-           and df_u["immunization_date"].notna().any()
-        else "2020-01-01"
-    )
+    visits  = get_visits_df()
+    d_start = (visits["immunization_date"].iloc[0].strftime("%Y-%m-%d")     # date-sorted
+               if visits is not None and not visits.empty else "2020-01-01")
 
+    # Opens on LAST MONTH (complete) compared with the month before — both
+    # months have (nearly) all their records, so the ▲/▼ are always meaningful.
+    # "This month" (fills in as records arrive), quarters, years, All time: Period.
+    _m0 = pd.Timestamp.today().normalize().replace(day=1)
+    _lm = _m0.to_period("M") - 1
+    _def_start, _def_end = f"{_lm.start_time:%Y-%m-%d}", f"{_lm.end_time:%Y-%m-%d}"
+    _default = {"value": f"{_def_start}|{_def_end}"}
     return html.Div([
-        # Header
-        dbc.Row([
-            dbc.Col(html.H5("Stunting Surveillance Dashboard",
-                            className="fw-bold mb-0", style={"color": "#2C3E50"})),
-            dbc.Col([
-                html.Span(f"Data as of {datetime.today().strftime('%d %b %Y')}",
-                          className="text-muted me-2", style={"fontSize": "0.78rem"}),
-                dbc.Badge(
-                    f"Source: {__import__('data').get_data_source().upper()}",
-                    color="success" if __import__('data').get_data_source() == "postgresql"
-                          else "secondary",
-                    className="fw-semibold",
-                    style={"fontSize": "0.7rem"},
-                ),
-            ], className="text-end d-flex align-items-center justify-content-end"),
-        ], className="align-items-center mb-3"),
+        # Page title lives in the top bar and sync freshness in the sidebar
+        # (components/layout.py), so the page opens straight on the filters.
+        dcc.Download(id="db-download"),
 
-        # Filters
+        # Filters — the Period picker fills the date range; the dashboard and
+        # the downloads both follow the dates.
         dbc.Card(dbc.CardBody(
             dbc.Row([
                 dbc.Col(dcc.Dropdown(id="db-prov",  placeholder="All Provinces",
                                      options=province_options(df_u), clearable=True,
                                      disabled=locked, style={"fontSize": "0.82rem"}),
-                        xs=6, md=3),
+                        xs=6, md=4, xl=2),
                 dbc.Col(dcc.Dropdown(id="db-dist",  placeholder="All Districts",
                                      options=district_options(df_u), clearable=True,
                                      disabled=locked, style={"fontSize": "0.82rem"}),
-                        xs=6, md=3),
+                        xs=6, md=4, xl=2),
                 dbc.Col(dcc.Dropdown(id="db-hosp",  placeholder="All Hospitals",
                                      options=hospital_options(df_u), clearable=True,
                                      disabled=locked, style={"fontSize": "0.82rem"}),
-                        xs=6, md=3),
+                        xs=6, md=4, xl=2),
+                dbc.Col(dcc.Dropdown(id="db-period", options=_period_options(d_start),
+                                     value=_default["value"], clearable=False, searchable=False,
+                                     placeholder="Custom dates",
+                                     style={"fontSize": "0.82rem"}),
+                        xs=6, md=4, xl=2),
                 dbc.Col(dcc.DatePickerRange(id="db-dates",
-                                            start_date=d_start, end_date=d_end,
+                                            start_date=_def_start, end_date=_def_end,
                                             display_format="DD/MM/YYYY",
                                             style={"fontSize": "0.82rem"}),
-                        xs=6, md=3),
-            ], className="g-2"),
+                        xs=12, md=True),
+                dbc.Col(_download_menu(user), width="auto",
+                        className="d-flex justify-content-end ms-auto"),
+            ], className="g-2 align-items-center"),
             className="py-2 px-3"),
-            className="mb-3 border-0 shadow-sm", style={"borderRadius": "8px"}),
+            className="mb-2 border-0 shadow-sm", style={"borderRadius": "8px"}),
+        html.Div(id="db-dl-msg", className="mb-1"),
 
         # KPI row (national headline — computed once, warmed in background)
+        html.Div(id="db-kpi-caption", hidden=True),   # explanation now lives on the cards
         dbc.Row([kpi_placeholder() for _ in range(8)],
                 id="db-kpi-row", className="g-2 mb-3"),
         dcc.Interval(id="db-kpi-poll", interval=2500, n_intervals=0),
@@ -143,47 +148,281 @@ def layout(user: dict) -> html.Div:
     ])
 
 
+_MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+
+def _last3_option() -> dict:
+    """The last 3 COMPLETE months (today: Jul–Sep), the dashboard's default
+    view. Value is tagged "last3|start|end" so it stays distinct from a
+    quarter covering the same months."""
+    m0 = pd.Timestamp.today().normalize().replace(day=1)
+    a, b = (m0.to_period("M") - 3).to_timestamp(), m0 - pd.Timedelta(days=1)
+    return {"label": f"Last 3 months ({_MON[a.month-1]}–{_MON[b.month-1]} {b.year})",
+            "value": f"last3|{a:%Y-%m-%d}|{b:%Y-%m-%d}"}
+
+
+def period_range(value: str) -> tuple[str, str]:
+    """Start/end dates of a Period option value ("start|end" or "last3|start|end")."""
+    parts = value.split("|")
+    return parts[-2], parts[-1]
+
+
+def _period_options(data_start: str) -> list[dict]:
+    """Quick periods → date ranges. Value = "YYYY-MM-DD|YYYY-MM-DD" ("all" for
+    everything). Quarters are labelled by their months, so they read right in
+    either calendar or fiscal (Jul–Jun) terms."""
+    today = pd.Timestamp.today().normalize()
+    first = pd.Timestamp(data_start or "2020-01-01")
+    def rng(a, b):
+        return f"{a:%Y-%m-%d}|{min(b, today):%Y-%m-%d}"
+    month0 = today.replace(day=1)
+    prev0 = (month0 - pd.Timedelta(days=1)).replace(day=1)
+    opts = [{"label": "All time", "value": "all"},
+            {"label": f"This month ({_MON[today.month-1]} {today.year})",
+             "value": rng(month0, today)},
+            {"label": f"Last month ({_MON[prev0.month-1]} {prev0.year})",
+             "value": rng(prev0, month0 - pd.Timedelta(days=1))},
+            _last3_option()]
+    q = pd.Period(today, freq="Q")
+    while q.end_time >= first:
+        a, b = q.start_time.normalize(), q.end_time.normalize()
+        tag = " (so far)" if b >= today else ""
+        opts.append({"label": f"{_MON[a.month-1]}–{_MON[b.month-1]} {a.year}{tag}",
+                     "value": rng(a, b)})
+        q -= 1
+    for y in range(today.year, first.year - 1, -1):
+        opts.append({"label": f"Year {y}" + (" (so far)" if y == today.year else ""),
+                     "value": rng(pd.Timestamp(y, 1, 1), pd.Timestamp(y, 12, 31))})
+    return opts
+
+
+_DL_ITEMS = [("stunted", "bi-arrow-down-circle", "Stunted children"),
+             ("at_risk", "bi-exclamation-triangle", "At-risk children"),
+             ("missed", "bi-calendar-x", "Missed appointments"),
+             ("assessed", "bi-people", "All assessed children")]
+
+
+def _download_menu(user: dict):
+    """Excel downloads limited to the user's catchment + the filters below.
+    Hidden for view-only email links."""
+    if user.get("readonly"):
+        return None
+    from core.exports import scope_label
+    return dbc.DropdownMenu(
+        [dbc.DropdownMenuItem(f"Your area: {scope_label(user)} · uses the filters below",
+                              header=True, style={"fontSize": "0.72rem"})]
+        + [dbc.DropdownMenuItem([html.I(className=f"bi {icon} me-2"), label],
+                                id=f"db-dl-{key}", n_clicks=0)
+           for key, icon, label in _DL_ITEMS],
+        id="db-dl-menu", label=[html.I(className="bi bi-download me-1"), "Download list"],
+        size="sm", color="light", align_end=True, className="nhic-dl-menu")
+
+
 # ── Callbacks ──────────────────────────────────────────────────────────────────
 
-def _national_cards(res: dict) -> list:
+def _month_aligned(a: pd.Timestamp, b: pd.Timestamp) -> bool:
+    return a.day == 1 and (b + pd.Timedelta(days=1)).day == 1
+
+
+def _prev_range(start, end) -> tuple[str, str, str] | None:
+    """The period just before [start, end], same length. Whole months/quarters/
+    years shift by calendar months (Jul–Sep → Apr–Jun, Sep → Aug); anything
+    else shifts by the same number of days. None for "All time"-sized ranges."""
+    if not start or not end:
+        return None
+    a, b = pd.Timestamp(start), pd.Timestamp(end)
+    if (b - a).days > 400:                                  # ~all time: nothing to compare
+        return None
+    if _month_aligned(a, b):
+        n = (b.year - a.year) * 12 + b.month - a.month + 1
+        pa = (a.to_period("M") - n).to_timestamp()
+        pb = a - pd.Timedelta(days=1)
+        if n == 1:
+            label = f"{pa:%b %Y}"
+        elif n == 12 and pa.month == 1:
+            label = f"{pa.year}"
+        else:
+            label = f"{pa:%b}–{pb:%b %Y}"
+    elif a.day == 1 and a.to_period("M") == b.to_period("M"):
+        # month in progress (1–6 Oct) → the same days of last month (1–6 Sep)
+        pm = (a.to_period("M") - 1)
+        pa = pm.to_timestamp()
+        pb = pa + pd.Timedelta(days=min(b.day, pm.days_in_month) - 1)
+        label = f"1–{pb.day} {pb:%b %Y}"
+    elif a.month == 1 and a.day == 1 and (b - a).days > 92:
+        # year so far → the same dates last year
+        pa, pb = a - pd.DateOffset(years=1), b - pd.DateOffset(years=1)
+        label = f"same dates {pa.year}"
+    else:
+        pb = a - pd.Timedelta(days=1)
+        pa = pb - (b - a)
+        label = f"{pa:%d %b}–{pb:%d %b %Y}"
+    return f"{pa:%Y-%m-%d}", f"{pb:%Y-%m-%d}", label
+
+
+def _change(cur, prev, vs: str, points: bool = False, cur_label: str | None = None) -> dict | None:
+    """Change vs the previous period, spelled out so it can't be misread:
+    counts → "+3,888 (+9.2%)" with "vs Apr–Jun 2026: 42,405";
+    rates  → "+0.9 pts" with "vs Apr–Jun 2026: 11.6%".
+    cur_label: when the badge compares a different window than the card shows
+    (All time → "2026 so far"), name it and give its value too."""
+    if cur is None or prev is None:
+        return None
+    if points:
+        diff = round(float(cur) - float(prev), 1)
+        text = f"{diff:+.1f} pts"
+        fmt = lambda v: f"{v}%"
+    else:
+        if prev == 0:
+            return None
+        diff_n = cur - prev
+        diff = round(diff_n / prev * 100, 1)
+        text = f"{diff_n:+,} ({diff:+.1f}%)"
+        fmt = lambda v: f"{v:,}"
+    direction = "up" if diff > 0 else "down" if diff < 0 else "flat"
+    detail = (f"{cur_label}: {fmt(cur)} vs {vs}: {fmt(prev)}" if cur_label
+              else f"vs {vs}: {fmt(prev)}")
+    return {"text": text, "dir": direction, "detail": detail}
+
+
+def _period_label(start, end) -> str:
+    a, b = pd.Timestamp(start), pd.Timestamp(end)
+    if a.day == 1 and a.to_period("M") == b.to_period("M") and not _month_aligned(a, b):
+        return f"{a:%B %Y} so far (1–{b.day} {b:%b})"
+    if _month_aligned(a, b):
+        return f"{a:%b %Y}" if a.to_period("M") == b.to_period("M") else (
+            f"{a:%b}–{b:%b %Y}" if a.year == b.year else f"{a:%b %Y}–{b:%b %Y}")
+    return f"{a:%d %b %Y} – {b:%d %b %Y}"
+
+
+def _risk_href(province, district, hospital, start, end) -> str:
+    from urllib.parse import urlencode
+    q = {k: v for k, v in (("prov", province), ("dist", district), ("hosp", hospital),
+                           ("from", start), ("to", end)) if v}
+    return "/rsss_app/risk" + (f"?{urlencode(q)}" if q else "")
+
+
+def _national_cards(res: dict, risk: dict | None = None, href: str | None = None,
+                    prev: dict | None = None, prev_risk: dict | None = None,
+                    vs: str | None = None, cur: dict | None = None,
+                    cur_risk: dict | None = None, cur_label: str | None = None,
+                    latest_month: str | None = None, incomplete: str | None = None) -> list:
+    """cur/cur_risk: the figures the ▲/▼ badge compares against prev — by
+    default the card's own value; on "All time" it's this year so far vs the
+    same dates last year, while the card itself shows the all-time total."""
+    cur, cur_risk = cur or res, cur_risk or risk
+    # When far fewer children are in the data than in the comparison period
+    # (late data entry / not yet synced), comparing COUNTS would show a false
+    # "improvement" — show a neutral note instead. Rates are kept.
+    waiting = {"text": "data still arriving", "dir": "flat", "detail": incomplete} if incomplete else None
     """The 7 headline KPI cards (national figures, deduplicated by child)."""
     def f(v):
         return f"{v:,}" if isinstance(v, int) else ("—" if v is None else str(v))
 
     return [
         metric_card("Total Vaccinated", f(res["total_vaccinated"]),
-                    "unique children", C_INFO, "bi-people-fill"),
+                    "unique children", C_INFO, "bi-people-fill", xl=True),
         metric_card("Total Stunted", f(res["current_total"]),
-                    "current (latest visit)", C_PRIMARY, "bi-arrow-down-circle-fill"),
+                    "current (latest visit)", C_PRIMARY, "bi-arrow-down-circle-fill", xl=True,
+                    delta=waiting or (prev and _change(cur["current_total"], prev["current_total"], vs, cur_label=cur_label))),
         metric_card("Ever Stunted", f(res["ever_stunted"]),
-                    "stunted at any visit", C_WARNING, "bi-clock-history"),
+                    "stunted at any visit", C_WARNING, "bi-clock-history", xl=True,
+                    delta=waiting or (prev and _change(cur["ever_stunted"], prev["ever_stunted"], vs, cur_label=cur_label))),
         metric_card("Stunting Rate", f"{res['stunting_pct']}%",
-                    "of assessed children", C_DANGER, "bi-graph-down-arrow"),
-       
+                    "of assessed children" + (f" · latest month {latest_month}" if latest_month else ""),
+                    C_DANGER, "bi-graph-down-arrow", xl=True,
+                    delta=prev and _change(cur["stunting_pct"], prev["stunting_pct"], vs, points=True, cur_label=cur_label)),
+        metric_card("High-Risk Children",
+                    f(risk["high"]) if risk else "—",
+                    (f"weight loss / severe wasting · {risk['at_risk']:,} at risk in total  ›  View"
+                     if risk else "growth faltering"),
+                    "#B03A2E", "bi-exclamation-triangle-fill", href=href, xl=True,
+                    delta=waiting or (cur_risk and prev_risk and _change(cur_risk["high"], prev_risk["high"], vs, cur_label=cur_label))),
     ]
+
+
+def _options_source():
+    """Area names for the filter dropdowns: the in-memory per-child table (instant);
+    get_df() (a ~14s database read) only on a cold start."""
+    from data import get_child_df
+    c = get_child_df()
+    return c if c is not None else get_df()
 
 
 def register_callbacks(app) -> None:
 
+    @app.callback(Output("db-period", "value"),
+                  Output("db-dates", "start_date"), Output("db-dates", "end_date"),
+                  Input("db-period", "value"),
+                  Input("db-dates", "start_date"), Input("db-dates", "end_date"),
+                  State("db-period", "options"),
+                  prevent_initial_call=True)
+    def _period(period, start, end, options):
+        from dash import ctx
+        if ctx.triggered_id == "db-period":
+            if period == "all":
+                # the real data range — exactly what the page opens with
+                from data import get_visits_df
+                v = get_visits_df()
+                first = (v["immunization_date"].iloc[0].strftime("%Y-%m-%d")
+                         if v is not None and not v.empty else "2020-01-01")
+                return no_update, first, pd.Timestamp.today().strftime("%Y-%m-%d")
+            a, b = period_range(period)
+            return no_update, a, b
+        # dates edited by hand → show which preset (if any) they match
+        match = next((o["value"] for o in options
+                      if o["value"] != "all" and period_range(o["value"]) == (start, end)), None)
+        return match, no_update, no_update
+
+    @app.callback(Output("db-download", "data"), Output("db-dl-msg", "children"),
+                  [Input(f"db-dl-{k}", "n_clicks") for k, _, _ in _DL_ITEMS],
+                  State("db-prov", "value"), State("db-dist", "value"), State("db-hosp", "value"),
+                  State("db-dates", "start_date"), State("db-dates", "end_date"),
+                  prevent_initial_call=True,
+                  running=[(Output("db-dl-menu", "disabled"), True, False),
+                           (Output("db-dl-menu", "label"),
+                            [html.Span(className="spinner-border spinner-border-sm me-1"), "Preparing…"],
+                            [html.I(className="bi bi-download me-1"), "Download list"])])
+    def _download(*args):
+        from dash import ctx
+        from auth import current_user
+        from core.exports import build_download, ExportTooLarge
+        prov, dist, hosp, start, end = args[-5:]
+        kind = (ctx.triggered_id or "").replace("db-dl-", "")
+        if not any(args[:-5]):
+            return no_update, no_update
+        user = (current_user() or {})
+        try:
+            content, fname, n = build_download(kind, user, prov, dist, hosp, start, end)
+        except ExportTooLarge as exc:
+            return no_update, dbc.Alert(str(exc), color="warning", dismissable=True, className="py-2")
+        except Exception as exc:
+            return no_update, dbc.Alert(f"Download failed: {exc}", color="danger",
+                                        dismissable=True, className="py-2")
+        note = dbc.Alert(f"Downloaded {n:,} children. The file contains personal data — "
+                         "keep it within your team.", color="success", dismissable=True,
+                         duration=8000, className="py-2")
+        return dcc.send_bytes(content, fname), note
+
     @app.callback(Output("db-dist", "options"),
                   Input("db-prov", "value"))
     def _dist_opts(province):
-        from flask import session
-        user = session.get("user")
+        from auth import current_user
+        user = current_user()
         if not user:
             return []
-        df = get_df()
+        df = _options_source()
         return district_options(filter_by_user(df, user) if df is not None else pd.DataFrame(), province)
 
     @app.callback(Output("db-hosp", "options"),
                   Input("db-dist", "value"),
                   State("db-prov", "value"))
     def _hosp_opts(district, province):
-        from flask import session
-        user = session.get("user")
+        from auth import current_user
+        user = current_user()
         if not user:
             return []
-        df = get_df()
+        df = _options_source()
         if df is None:
             return []
         df = filter_by_user(df, user)
@@ -193,6 +432,7 @@ def register_callbacks(app) -> None:
 
     @app.callback(
         Output("db-kpi-row", "children"),
+        Output("db-kpi-caption", "children"),
         Output("db-kpi-poll", "disabled"),
         Input("db-kpi-poll", "n_intervals"),
         Input("db-prov",  "value"), Input("db-dist",  "value"),
@@ -200,23 +440,81 @@ def register_callbacks(app) -> None:
         Input("db-dates", "end_date"),
     )
     def _kpis(_n, province, district, hospital, start, end):
-        from flask import session
-        user = session.get("user")
+        from auth import current_user
+        user = current_user()
         if not user:
-            return [kpi_placeholder() for _ in range(8)], True
+            return [kpi_placeholder() for _ in range(8)], "", True
         from data import (get_child_df, get_visits_df, warm_child_level,
-                          child_build_status, scoped_child_df, summarize_children)
+                          child_build_status, get_risk_df)
         child  = get_child_df()
         visits = get_visits_df()
         if child is None or visits is None:
             warm_child_level()                            # ensure it's running
             keep_polling = child_build_status() != "error"
-            return [kpi_placeholder() for _ in range(8)], (not keep_polling)
+            return [kpi_placeholder() for _ in range(8)], "", (not keep_polling)
         # Cheap for the default/wide range; only re-derives from raw visits
         # (correctly, per-period) when the date range is narrow — see
         # scoped_child_df's docstring.
-        c = scoped_child_df(child, visits, user, province, district, hospital, start, end)
-        return _national_cards(summarize_children(c)), True
+        from data import memo_summary
+        res = memo_summary("child", user, province, district, hospital, start, end)
+        risk = get_risk_df()
+        have_risk = risk is not None and not risk.empty
+        rs = memo_summary("risk", user, province, district, hospital, start, end) if have_risk else None
+        prev = prev_rs = vs = cur = cur_rs = None
+        pr = _prev_range(start, end)
+        if pr is None:
+            # "All time": the badge compares THIS YEAR SO FAR with the same
+            # dates last year (the card still shows the all-time total).
+            today = pd.Timestamp.today().normalize()
+            y0 = pd.Timestamp(today.year, 1, 1)
+            c_start, c_end = f"{y0:%Y-%m-%d}", f"{today:%Y-%m-%d}"
+            cur = memo_summary("child", user, province, district, hospital, c_start, c_end)
+            if have_risk:
+                cur_rs = memo_summary("risk", user, province, district, hospital, c_start, c_end)
+            ly = today - pd.DateOffset(years=1)
+            pr = (f"{y0 - pd.DateOffset(years=1):%Y-%m-%d}", f"{ly:%Y-%m-%d}",
+                  f"same dates {ly.year}")
+            cur_label = f"{today.year} so far"
+            caption = (f"All-time totals. Arrows compare {today.year} so far (1 Jan – {today:%d %b}) "
+                       f"with the same dates in {ly.year}.")
+        else:
+            cur_label = None
+            caption = f"{_period_label(start, end)}"
+        if pr:
+            p_start, p_end, vs = pr
+            prev = memo_summary("child", user, province, district, hospital, p_start, p_end)
+            if have_risk:
+                prev_rs = memo_summary("risk", user, province, district, hospital, p_start, p_end)
+            # Too little data in the earlier period (e.g. 2024, before the sync
+            # started) makes % changes meaningless (+262,000%) → no arrows.
+            base = (cur or res).get("total_vaccinated", 0)
+            if prev.get("total_vaccinated", 0) < max(100, 0.2 * base):
+                prev = prev_rs = None
+            if cur_label is None:
+                caption += f" compared with {vs} (the period just before)."
+        if prev is None and cur_label is None:
+            caption += " — no earlier period with enough data to compare."
+        incomplete = None
+        if prev:
+            ratio = (cur or res).get("assessed", 0) / max(prev.get("assessed", 0), 1)
+            if ratio < 0.7:
+                incomplete = f"{ratio:.0%} of {vs}'s volume so far"
+                caption += (f" Only {ratio:.0%} as many children are in the data as for {vs} — "
+                            "records are still being entered/synced, so counts aren't compared yet; "
+                            "the rate is.")
+        caption += " Each child is counted once, at their latest visit in the period."
+        # latest complete month's rate, to tie the card to the trend chart
+        from data import get_monthly_df, monthly_rate, filter_geo as _fg
+        latest = None
+        mdf = get_monthly_df()
+        if mdf is not None and not mdf.empty:
+            mr = monthly_rate(_fg(filter_by_user(mdf, user), province, district, hospital), start, end)
+            if not mr.empty:
+                last = mr.iloc[-1]
+                latest = f"{last['month']:%b} {last['y']}%"
+        return (_national_cards(res, rs, _risk_href(province, district, hospital, start, end),
+                                prev, prev_rs, vs, cur, cur_rs, cur_label, latest, incomplete),
+                html.Span([html.I(className="bi bi-info-circle me-1"), caption]), True)
 
     @app.callback(
         Output("db-tab-content", "children"),
@@ -227,34 +525,46 @@ def register_callbacks(app) -> None:
         Input("db-kpi-poll", "n_intervals"),   # re-render when the table finishes building
     )
     def _tab(tab, province, district, hospital, start, end, _poll):
-        from flask import session
-        user = session.get("user")
+        from auth import current_user
+        user = current_user()
         if not user:
             return html.Div()
-        df = get_df()
-        if df is None or df.empty:
-            return dbc.Alert("Data unavailable — check data/combined_df.csv",
-                             color="warning", className="mt-3")
-        df = filter_by_user(df, user)
-        df = filter_geo(df, province, district, hospital)
-        df = filter_by_date(df, start, end)
+        # Overview needs the database-read table only for its vaccination
+        # coverage section → never wait for it (~14s): use it if loaded, else it
+        # loads in the background and that section fills in on the next refresh.
+        # The other tabs are built entirely from it, so they wait as before.
+        if tab == "overview":
+            from data import get_df_if_ready
+            df = get_df_if_ready()
+        else:
+            df = get_df()
+            if df is None or df.empty:
+                return dbc.Alert("Data unavailable — check data/combined_df.csv",
+                                 color="warning", className="mt-3")
+        if df is not None:
+            df = filter_by_user(df, user)
+            df = filter_geo(df, province, district, hospital)
+            df = filter_by_date(df, start, end)
 
         # The Overview now uses the cached computed per-child table (+ monthly
         # trend), filtered identically. These reflect the WHO-computed stunting
         # so the charts match the KPI cards.
         if tab == "overview":
-            from data import get_child_df, get_visits_df, get_monthly_df, get_schedule_df, scoped_child_df
+            from data import get_child_df, get_visits_df, get_monthly_df, get_schedule_df
             child_raw = get_child_df()
             visits    = get_visits_df()
             monthly   = get_monthly_df()
             schedule  = get_schedule_df()
             child = pd.DataFrame()
             if child_raw is not None and not child_raw.empty:
-                child = scoped_child_df(child_raw, visits, user, province, district, hospital, start, end)
+                from data import memo_scoped          # same result the KPI cards just computed
+                child = memo_scoped("child", user, province, district, hospital, start, end)
+            # User's own area first (a district officer must see their district's
+            # trend, not the national one), then the dashboard filters.
             if monthly is not None and not monthly.empty:
-                monthly = filter_geo(monthly, province, district, hospital)
+                monthly = filter_geo(filter_by_user(monthly, user), province, district, hospital)
             if schedule is not None and not schedule.empty:
-                schedule = filter_geo(schedule, province, district, hospital)
+                schedule = filter_geo(filter_by_user(schedule, user), province, district, hospital)
             return _overview(df, child, monthly, schedule, start, end)
 
         dispatch = {
@@ -362,10 +672,17 @@ def _overview(df: pd.DataFrame, child=None, monthly=None, schedule=None,
     have_sched = schedule is not None and not schedule.empty
     building = "Waiting for the computation"
 
+    # Trend charts show at least 12 months up to the period end, so a single
+    # month/quarter is seen in context (the selected period is shaded).
+    ctx_start = start
+    if start and end:
+        ctx = (pd.Timestamp(end).to_period("M") - 11).to_timestamp()
+        ctx_start = min(pd.Timestamp(start), ctx).strftime("%Y-%m-%d")
+
     # ── 1. Stunting RATE over time (WHO computed, future/thin months removed) ──
     fig_rate = _empty(building if not have_month else "No date data")
     if have_month:
-        m = _month_rate(monthly, start, end, "rate")
+        m = _month_rate(monthly, ctx_start, end, "rate")
         if not m.empty:
             fig_rate = px.area(m, x="month", y="y", text="y",
                                title="Stunting Rate Over Time(%)",
@@ -381,6 +698,13 @@ def _overview(df: pd.DataFrame, child=None, monthly=None, schedule=None,
             fig_rate.update_layout(margin=dict(l=48, r=40, t=48, b=40))
             fig_rate.update_yaxes(range=[0, max(float(m["y"].max()) * 1.28, 5)])
             fig_rate.update_xaxes(automargin=True)
+            if start and ctx_start != start:
+                fig_rate.add_vrect(
+                    x0=pd.Timestamp(start) - pd.Timedelta(days=15),
+                    x1=pd.Timestamp(end).to_period("M").to_timestamp() + pd.Timedelta(days=15),
+                    fillcolor="#0078C0", opacity=0.07, line_width=0,
+                    annotation_text="selected period", annotation_position="top left",
+                    annotation_font=dict(size=10, color="#0078C0"))
             if len(m) == 1:
                 # A single point on a date axis auto-ranges to a sub-second
                 # window (Plotly picks a default span around one timestamp) —
@@ -418,25 +742,41 @@ def _overview(df: pd.DataFrame, child=None, monthly=None, schedule=None,
                                           coloraxis_showscale=False,
                                           xaxis_title="Prevalence %", yaxis_title=""))
 
-    # ── 3. Severe vs Moderate split (computed) + severe-share trend ───────────
-    fig_sev = _empty(building if not have_child else "No severity data")
-    if have_child:
-        sev = int(child["is_severe"].eq(True).sum())
-        tot = int(child["is_stunted"].eq(True).sum())
-        mod = max(tot - sev, 0)
-        if sev + mod > 0:
-            sv = pd.DataFrame({"Severity": ["Severely Stunted", "Moderately Stunted"],
-                               "Children": [sev, mod]})
-            fig_sev = px.pie(sv, names="Severity", values="Children", hole=0.45,
-                             title="Severe vs Moderate Stunting",
-                             color="Severity",
-                             color_discrete_map={"Severely Stunted": "#922B21",
-                                                 "Moderately Stunted": "#E59866"})
-            fig_sev.update_layout(**_base(height=_H))
+    # ── 3. Stunted children by sex (computed) + severe-share trend ────────────
+    # Among ASSESSED children only (usable height + age) — this also keeps out
+    # the ~220k 12-year-old girls recorded for HPV, who have no height.
+    fig_sev = _empty(building if not have_child else "No sex recorded")
+    if have_child and "sex" in child.columns:
+        a = child[child["is_stunted"].notna() & child["sex"].isin(["Male", "Female"])]
+        if not a.empty:
+            g = (a.assign(_st=a["is_stunted"].eq(True))
+                  .groupby("sex", observed=True).agg(assessed=("_st", "size"), stunted=("_st", "sum"))
+                  .reindex(["Male", "Female"]).fillna(0))
+            g["rate"] = (g["stunted"] / g["assessed"].clip(lower=1) * 100).round(1)
+            labels = {"Male": "Boys", "Female": "Girls"}
+            if g["stunted"].sum() > 0:
+                fig_sev = go.Figure(go.Pie(
+                    labels=[labels[x] for x in g.index], values=g["stunted"].astype(int),
+                    hole=0.55, sort=False, direction="clockwise",
+                    marker=dict(colors=["#1F6FB2", "#C2185B"]),
+                    customdata=g[["assessed", "rate"]].to_numpy(),
+                    texttemplate="%{label}<br>%{percent}", textfont=dict(size=12),
+                    hovertemplate=("%{label}: %{value:,} stunted (%{percent} of stunted)<br>"
+                                   "stunting rate %{customdata[1]}% of %{customdata[0]:,} assessed"
+                                   "<extra></extra>")))
+                rates = "   ".join(f"{labels[x]} <b>{g.loc[x, 'rate']}%</b>" for x in g.index)
+                fig_sev.update_layout(**_base(height=_H), title="Stunted Children by Sex",
+                                      showlegend=False)
+                fig_sev.add_annotation(text=f"{int(g['stunted'].sum()):,}<br><span style='font-size:11px'>stunted</span>",
+                                       x=0.5, y=0.5, showarrow=False, font=dict(size=18, color="#1F2D3D"))
+                fig_sev.add_annotation(text=f"Stunting rate:   {rates}", x=0.5, y=-0.12,
+                                       xref="paper", yref="paper", showarrow=False,
+                                       font=dict(size=12, color="#5D6D7E"))
+                fig_sev.update_layout(margin=dict(l=20, r=20, t=48, b=48))
 
     fig_sevtrend = _empty(building if not have_month else "No date data")
     if have_month:
-        ms = _month_rate(monthly, start, end, "severe_share")
+        ms = _month_rate(monthly, ctx_start, end, "severe_share")
         if not ms.empty and ms["y"].sum() > 0:
             fig_sevtrend = px.line(ms, x="month", y="y", markers=True, text="y",
                                    title="Severe Share of Stunted Children Over Time (%)",
@@ -490,8 +830,9 @@ def _overview(df: pd.DataFrame, child=None, monthly=None, schedule=None,
             fig_sched.update_xaxes(categoryorder="array", categoryarray=cat_order)
 
     # ── 4. Vaccination coverage gap (among stunted children, column df) ───────
-    fig_cov = _empty("Vaccine columns not in current data source")
-    cov = _coverage_table(df)
+    fig_cov = _empty("Vaccine columns not in current data source" if df is not None
+                     else "Loading vaccination data… (refresh in a moment)")
+    cov = _coverage_table(df) if df is not None else pd.DataFrame()
     if not cov.empty:
         cov = cov.sort_values("Coverage", ascending=True)
         n_u = cov["Total"].iloc[0]

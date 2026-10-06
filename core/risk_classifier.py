@@ -169,10 +169,24 @@ def _parse_muac(series: pd.Series) -> pd.Series:
 
 # ── Core classification ────────────────────────────────────────────────────────
 
-def classify_at_risk(df: pd.DataFrame) -> pd.DataFrame:
+# Why a visit is at risk — bit flags (several can be true at once)
+REASONS = {
+    1:  "Lost weight between visits",
+    2:  "MUAC below 11.5 cm",
+    4:  "Severe wasting",
+    8:  "MUAC 11.5–12.5 cm",
+    16: "Moderate wasting",
+    32: "Slow weight gain",
+    64: "Slow height gain",
+}
+
+
+def classify_visits(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Given a multi-visit DataFrame (all visits), return at-risk children
-    (HIGH or MEDIUM) with one row per child using unique entity_id.
+    Per-VISIT risk: one row per visit that has a weight and a date, with
+    weight/height velocity since the child's previous visit, risk_level
+    (HIGH / MEDIUM / OK) and risk_flags (bit mask of REASONS). Needs each
+    child's full visit history to compute velocities.
 
     Required columns: immunization_date, weight_at_visit_kg
     Preferred cols:   entity_id (unique child), height_at_visit_cm,
@@ -283,6 +297,35 @@ def classify_at_risk(df: pd.DataFrame) -> pd.DataFrame:
     medium_mask = medium_velocity_mask | medium_other_mask
 
     df["risk_level"] = np.select([high_mask, medium_mask], ["HIGH", "MEDIUM"], default="OK")
+
+    flags = np.zeros(len(df), dtype=np.int16)
+    for bit, mask in (
+        (1,  w_vel.notna() & (w_vel < 0)),
+        (2,  muac.notna() & (muac < _MUAC_HIGH)),
+        (4,  wast.str.contains("severe", na=False)),
+        (8,  muac.notna() & (muac >= _MUAC_HIGH) & (muac < _MUAC_MEDIUM)),
+        (16, (wast.str.contains("moderate", na=False) | wast.str.contains("wasted", na=False))
+             & ~wast.str.contains("severe", na=False)),
+        (32, age.notna() & w_vel.notna() & (w_vel >= 0) & (w_vel < who_w_min * _MEDIUM_WEIGHT_FRACTION)),
+        (64, age.notna() & h_vel.notna() & (h_vel < who_h_min * _MEDIUM_HEIGHT_FRACTION)),
+    ):
+        flags[mask.to_numpy()] |= bit
+    df["risk_flags"] = flags
+    return df
+
+
+def classify_at_risk(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Given a multi-visit DataFrame (all visits), return at-risk children
+    (HIGH or MEDIUM) with one row per child using unique entity_id — the
+    WORST risk seen at any visit. Used by the monthly hospital reports.
+    (The dashboards judge risk at each child's latest visit instead — see
+    data.scoped_risk_df.)
+    """
+    df = classify_visits(df)
+    if df is None or df.empty:
+        return pd.DataFrame()
+    tei_col = "tracked_entity_instance"
 
     # ── Aggregate to one row per child (worst risk ever seen) ─────────────────
     risk_order = {"HIGH": 3, "MEDIUM": 2, "OK": 1}

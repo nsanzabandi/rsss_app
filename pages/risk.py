@@ -35,11 +35,6 @@ _GREY = "#6C757D"
 
 # ── Small helpers ──────────────────────────────────────────────────────────────
 
-def _badge(level: str) -> dbc.Badge:
-    color = {"HIGH": "danger", "MEDIUM": "warning"}.get(level, "secondary")
-    return dbc.Badge(level, color=color, className="fw-semibold")
-
-
 def _card_wrap(content, **style) -> dbc.Card:
     return dbc.Card(
         dbc.CardBody(content, className="p-2"),
@@ -49,66 +44,6 @@ def _card_wrap(content, **style) -> dbc.Card:
 
 
 # ── Risk table ─────────────────────────────────────────────────────────────────
-
-def _risk_table(df: pd.DataFrame) -> dbc.Table:
-    cols = [
-        ("entity_id",           "Entity ID"),
-        ("tracked_entity_instance", "TEI"),
-        ("child_name",          "Name"),
-        ("gender",              "Gender"),
-        ("age_in_months",       "Age (mo)"),
-        ("weight_at_visit_kg",  "Weight (kg)"),
-        ("height_at_visit_cm",  "Height (cm)"),
-        ("weight_velocity",     "Wt Vel"),
-        ("height_velocity",     "Ht Vel"),
-        ("visit_count",         "Visits"),
-        ("health_facility",     "Facility"),
-        ("district_hospital",   "Hospital"),
-        ("district",            "District"),
-        ("risk_level",          "Risk"),
-    ]
-    # Only show columns that exist; prefer entity_id over tei
-    avail = [(s, h) for s, h in cols if s in df.columns]
-    if ("entity_id", "Entity ID") in avail and ("tracked_entity_instance", "TEI") in avail:
-        avail = [(s, h) for s, h in avail if s != "tracked_entity_instance"]
-
-    header = html.Thead(html.Tr(
-        [html.Th(h, style={"fontSize": "0.75rem", "whiteSpace": "nowrap"})
-         for _, h in avail]
-    ))
-
-    def _fmt(col, val):
-        if pd.isna(val) if not isinstance(val, list) else False:
-            return "—"
-        if col == "risk_level":
-            return _badge(str(val))
-        if col in ("weight_velocity", "height_velocity"):
-            try:
-                return f"{float(val):+.2f}"
-            except Exception:
-                return str(val)
-        if col in ("weight_at_visit_kg", "height_at_visit_cm"):
-            try:
-                return f"{float(val):.1f}"
-            except Exception:
-                return str(val)
-        return str(val) if val is not None else "—"
-
-    rows = []
-    for _, row in df.iterrows():
-        bg = "#FDF2F2" if row.get("risk_level") == "HIGH" else "#FFFDE7"
-        rows.append(html.Tr(
-            [html.Td(_fmt(col, row.get(col)), style={"fontSize": "0.76rem"})
-             for col, _ in avail],
-            style={"background": bg},
-        ))
-
-    return dbc.Table([header, html.Tbody(rows)],
-                     bordered=True, hover=True, size="sm",
-                     responsive=True, className="mb-0")
-
-
-# ── Missed appointments table ──────────────────────────────────────────────────
 
 def _missed_table(df: pd.DataFrame) -> dbc.Table:
     cols = [
@@ -176,22 +111,18 @@ def layout(user: dict) -> html.Div:
     This prevents blocking the Dash server thread at page render time.
     """
     return html.Div([
-        dbc.Row([
-            dbc.Col(html.H5("At-Risk & Missed Appointments",
-                            className="fw-bold mb-0", style={"color": "#2C3E50"})),
-            dbc.Col(dbc.Badge("entity_id deduplicated", color="secondary",
-                              className="fw-semibold ms-2"),
-                    width="auto", className="d-flex align-items-center"),
-        ], className="align-items-center mb-3"),
+        html.H4("At-Risk Children", className="nhic-page-title mb-2"),
 
         dbc.Tabs(
-            [dbc.Tab(label="At-Risk List",   tab_id="risk-list"),
-             dbc.Tab(label="Missed Appts",   tab_id="missed")]
+            [dbc.Tab(label="Dashboard",      tab_id="risk-dash")]
+            # child lists + operations need a login
+            + ([] if user.get("public") else [dbc.Tab(label="Missed Appts", tab_id="missed")])
             # eTracker sync is operational — hidden for view-only link users.
-            + ([] if user.get("readonly") else
-               [dbc.Tab(label="Sync eTracker", tab_id="sync")])
+            # eTracker sync is a national operation — ministry administrators only.
+            + ([dbc.Tab(label="Sync eTracker", tab_id="sync")]
+               if user.get("role") == "ministry" and not user.get("readonly") else [])
             + [dbc.Tab(label="Pipeline Guide", tab_id="guide")],
-            id="risk-tabs", active_tab="risk-list", className="mb-3"),
+            id="risk-tabs", active_tab="risk-dash", className="nhic-tabs mb-3"),
 
         html.Div(id="risk-tab-content"),
 
@@ -203,55 +134,10 @@ def layout(user: dict) -> html.Div:
         dcc.Store(id="risk-job-id"),
         # Interval starts DISABLED. It is only enabled when Start Sync is clicked.
         dcc.Interval(id="risk-poll", interval=4000, disabled=True, n_intervals=0),
-        dcc.Store(id="risk-df-store"),
     ])
 
 
 # ── Tab content builders ───────────────────────────────────────────────────────
-
-def _risk_list_tab(user: dict) -> html.Div:
-    """Returns the At-Risk List tab layout WITHOUT calling get_df().
-    Dropdowns are populated asynchronously by _populate_risk_filters callback."""
-    role   = user.get("role", "")
-    locked = role in ("hospital", "health_center")
-
-    return html.Div([
-        _card_wrap([
-            dbc.Row([
-                dbc.Col([dbc.Label("District", style=_LBL),
-                         dcc.Dropdown(id="risk-district", options=[],
-                                      placeholder="All Districts",
-                                      disabled=locked, clearable=True, style=_DD)], md=3),
-                dbc.Col([dbc.Label("Hospital", style=_LBL),
-                         dcc.Dropdown(id="risk-hospital", options=[],
-                                      placeholder="All Hospitals",
-                                      disabled=locked, clearable=True, style=_DD)], md=3),
-                dbc.Col([dbc.Label("Risk Level", style=_LBL),
-                         dcc.Dropdown(id="risk-level-filter",
-                                      options=[{"label": "HIGH",   "value": "HIGH"},
-                                               {"label": "MEDIUM", "value": "MEDIUM"}],
-                                      value=["HIGH", "MEDIUM"], multi=True,
-                                      clearable=False, style=_DD)], md=3),
-                dbc.Col([
-                    dbc.Label("Actions", style=_LBL),
-                    dbc.Row([
-                        dbc.Col(dbc.Button(
-                            [html.I(className="bi bi-cpu me-1"), "Run Classifier"],
-                            id="risk-run-btn", color="danger", size="sm",
-                            className="fw-semibold"), width="auto"),
-                        dbc.Col(dbc.Button(
-                            [html.I(className="bi bi-envelope me-1"), "Email Alerts"],
-                            id="risk-email-btn", color="outline-danger", size="sm",
-                            className="fw-semibold", disabled=True), width="auto"),
-                    ], className="g-1 mt-1"),
-                ], md=3),
-            ], className="g-2"),
-        ]),
-        dbc.Row(id="risk-kpi-row", className="g-2 mb-3"),
-        html.Div(id="risk-results"),
-        html.Div(id="risk-email-status", className="mt-2"),
-    ])
-
 
 def _missed_tab(user: dict) -> html.Div:
     """Missed appointments tab — children 10+ days overdue on next_visit_date."""
@@ -465,40 +351,21 @@ def register_callbacks(app) -> None:
 
     # ── Tab routing ────────────────────────────────────────────────────────────
     @app.callback(Output("risk-tab-content", "children"),
-                  Input("risk-tabs", "active_tab"))
-    def _switch(tab):
-        from flask import session
-        user = session.get("user") or {}
-        if tab == "sync":
+                  Input("risk-tabs", "active_tab"), State("url", "search"))
+    def _switch(tab, search):
+        from auth import current_user
+        user = (current_user() or {})
+        if tab == "sync" and user.get("role") == "ministry" and not user.get("readonly"):
             return _sync_tab()
         if tab == "guide":
             return _pipeline_guide_tab()
+        if user.get("public") and tab not in ("risk-dash", "guide"):
+            tab = "risk-dash"
         if tab == "missed":
             return _missed_tab(user)
-        return _risk_list_tab(user)
+        from pages.risk_dashboard import layout as risk_dashboard
+        return risk_dashboard(user, search)
 
-    # ── Populate risk filter dropdowns (async — separate callback) ─────────────
-    # This does NOT run at page load (prevent_initial_call=True).
-    # Dropdowns start empty; they fill when the risk-list tab is opened.
-    @app.callback(
-        Output("risk-district", "options"),
-        Output("risk-hospital", "options"),
-        Input("risk-tabs", "active_tab"),
-        prevent_initial_call=True,
-    )
-    def _populate_risk_filters(tab):
-        if tab != "risk-list":
-            return no_update, no_update
-        from flask import session
-        from data import get_df, filter_by_user, district_options, hospital_options
-        user = session.get("user") or {}
-        df   = get_df()
-        if df is None or df.empty:
-            return [], []
-        df = filter_by_user(df, user)
-        return district_options(df), hospital_options(df)
-
-    # ── Populate missed-appointment district dropdown ───────────────────────────
     @app.callback(
         Output("missed-district", "options"),
         Input("risk-tabs", "active_tab"),
@@ -507,105 +374,13 @@ def register_callbacks(app) -> None:
     def _populate_missed_filters(tab):
         if tab != "missed":
             return no_update
-        from flask import session
+        from auth import current_user
         from data import get_df, filter_by_user, district_options
-        user = session.get("user") or {}
+        user = (current_user() or {})
         df   = get_df()
         if df is None or df.empty:
             return []
         return district_options(filter_by_user(df, user))
-
-    # ── Run risk classifier ────────────────────────────────────────────────────
-    @app.callback(
-        Output("risk-df-store",    "data"),
-        Output("risk-kpi-row",     "children"),
-        Output("risk-results",     "children"),
-        Output("risk-email-btn",   "disabled"),
-        Input("risk-run-btn",      "n_clicks"),
-        State("risk-district",     "value"),
-        State("risk-hospital",     "value"),
-        State("risk-level-filter", "value"),
-        prevent_initial_call=True,
-    )
-    def _run_classifier(n, district, hospital, levels):
-        from flask import session
-        from data import get_df, filter_by_user, filter_geo
-        from core.risk_classifier import build_risk_df_for_dashboard, get_risk_summary
-        from components.kpi import kpi_card, C_DANGER, C_WARNING, C_INFO, C_TEAL
-
-        user = session.get("user") or {}
-        df   = get_df()
-        if df is None or df.empty:
-            return (no_update,
-                    dbc.Alert("No data loaded. Sync from eTracker first.", color="warning"),
-                    html.Div(), True)
-
-        df = filter_by_user(df, user)
-        df = filter_geo(df, district=district, hospital=hospital)
-
-        # Scope the selected area for role-limited users too.
-        role = user.get("role", "")
-        if role == "district" and not district:
-            district = user.get("district")
-        if role == "hospital" and not hospital:
-            hospital = user.get("hospital")
-
-        try:
-            at_risk = build_risk_df_for_dashboard(df, district=district, hospital=hospital)
-        except Exception as exc:
-            return (no_update,
-                    dbc.Alert(f"Classifier error: {exc}", color="danger"),
-                    html.Div(), True)
-
-        # build_risk_df_for_dashboard may fall back to loading ALL visits from the
-        # DB (to get full growth history), which bypasses the geo filter — so
-        # re-apply the user's district/hospital selection here.
-        at_risk = filter_by_user(at_risk, user)
-        at_risk = filter_geo(at_risk, district=district, hospital=hospital)
-
-        if at_risk.empty:
-            return (None, [],
-                    dbc.Alert("No at-risk children detected for these filters.",
-                              color="success", className="mt-2"),
-                    True)
-
-        if levels:
-            at_risk = at_risk[at_risk["risk_level"].isin(levels)]
-
-        summary = get_risk_summary(at_risk)
-
-        kpis = dbc.Row([
-            kpi_card("Total At-Risk",  str(summary["total"]),     "unique children",
-                     C_DANGER,  "bi-exclamation-triangle-fill"),
-            kpi_card("HIGH Risk",      str(summary["high"]),      "losing weight",
-                     "#8B0000",  "bi-heart-pulse-fill"),
-            kpi_card("MEDIUM Risk",    str(summary["medium"]),    "growth stalled",
-                     C_WARNING, "bi-graph-down-arrow"),
-            kpi_card("Districts",      str(summary["districts"]), "affected",
-                     C_INFO,    "bi-geo-alt-fill"),
-            kpi_card("Hospitals",      str(summary["hospitals"]), "affected",
-                     C_TEAL,    "bi-hospital-fill"),
-        ], className="g-2")
-
-        charts  = _make_risk_charts(at_risk)
-        tbl     = _risk_table(at_risk.head(200))
-        note    = (html.Div(f"Showing first 200 of {len(at_risk):,} at-risk children.",
-                            className="text-muted mt-1 mb-2",
-                            style={"fontSize": "0.75rem"})
-                   if len(at_risk) > 200 else html.Div())
-
-        results = html.Div([
-            charts, note,
-            dbc.Card(dbc.CardBody(tbl, className="p-0"),
-                     className="border-0 shadow-sm", style={"borderRadius": "8px"}),
-        ])
-
-        tei_col = "entity_id" if "entity_id" in at_risk.columns else "tracked_entity_instance"
-        store_data = (at_risk[[c for c in [tei_col, "risk_level",
-                                            "health_facility", "district_hospital",
-                                            "district"] if c in at_risk.columns]]
-                      .to_dict("records"))
-        return store_data, kpis, results, False
 
     # ── Load missed appointments ───────────────────────────────────────────────
     @app.callback(
@@ -617,11 +392,11 @@ def register_callbacks(app) -> None:
         prevent_initial_call=True,
     )
     def _load_missed(n, district, threshold):
-        from flask import session
+        from auth import current_user
         from data import get_df, filter_by_user, filter_geo, get_missed_appointments, nuniq
         from components.kpi import kpi_card, C_DANGER, C_WARNING, C_INFO, C_TEAL
 
-        user = session.get("user") or {}
+        user = (current_user() or {})
         df   = get_df()
         if df is None or df.empty:
             return [], dbc.Alert("No data loaded. Sync from eTracker first.",
@@ -669,61 +444,6 @@ def register_callbacks(app) -> None:
 
         return kpis, results
 
-    # ── Email at-risk alerts ───────────────────────────────────────────────────
-    @app.callback(
-        Output("risk-email-status", "children"),
-        Input("risk-email-btn",     "n_clicks"),
-        State("risk-df-store",      "data"),
-        prevent_initial_call=True,
-    )
-    def _send_alerts(n, store_data):
-        if not store_data:
-            return dbc.Alert("No at-risk children loaded.", color="warning", className="py-2")
-        try:
-            from core.email_sender import EmailSender
-            from config.app_config import TEST_EMAIL
-
-            at_risk = pd.DataFrame(store_data)
-            tei_col = ("entity_id" if "entity_id" in at_risk.columns
-                       else "tracked_entity_instance")
-            fac_col = ("health_facility" if "health_facility" in at_risk.columns
-                       else "district_hospital")
-            groups  = at_risk.groupby(fac_col, dropna=True) if fac_col in at_risk.columns \
-                      else [("All", at_risk)]
-
-            sender = EmailSender()
-            sender.connect()
-            sent = 0
-            for fac_name, grp in groups:
-                n_high   = int((grp["risk_level"] == "HIGH").sum())
-                n_medium = int((grp["risk_level"] == "MEDIUM").sum())
-                ids_list = "\n".join(
-                    f"  - {r}" for r in grp[tei_col].tolist()[:20]
-                ) if tei_col in grp.columns else ""
-                body = (
-                    f"RSSS At-Risk Children Alert\n"
-                    f"Facility: {fac_name}\n"
-                    f"Generated: {datetime.now().strftime('%d %b %Y %H:%M')}\n\n"
-                    f"Growth velocity analysis identified {len(grp)} at-risk children:\n\n"
-                    f"  HIGH risk (weight loss):      {n_high}\n"
-                    f"  MEDIUM risk (growth stalled): {n_medium}\n\n"
-                    f"Entity IDs:\n{ids_list}"
-                    + ("\n  ... (truncated)" if len(grp) > 20 else "") +
-                    "\n\nPlease follow up with each family promptly."
-                    "\n\n— RSSS Rwanda Stunting Surveillance System"
-                )
-                sender.send_email(
-                    to_email=TEST_EMAIL, cc_emails=[],
-                    subject=f"[RSSS] At-Risk Alert — {fac_name}",
-                    body=body, attachments=[],
-                )
-                sent += 1
-            sender.disconnect()
-            return dbc.Alert(f"✅ {sent} alert email(s) sent to {TEST_EMAIL}.",
-                             color="success", className="py-2")
-        except Exception as exc:
-            return dbc.Alert(f"Email error: {exc}", color="danger", className="py-2")
-
     # ── Start sync (mode buttons OR custom date range) ─────────────────────────
     @app.callback(
         Output("risk-job-id",        "data"),
@@ -739,9 +459,10 @@ def register_callbacks(app) -> None:
     )
     def _start_sync(n_mode, n_range, mode, r_start, r_end, force_refetch):
         from dash import ctx
-        from flask import session
-        # View-only users can never trigger a sync.
-        if (session.get("user") or {}).get("readonly"):
+        from auth import current_user
+        # Only ministry administrators may trigger a (national) sync.
+        _u = current_user() or {}
+        if _u.get("readonly") or _u.get("role") != "ministry":
             return no_update, no_update, no_update
         # Guard: only act on a real button click. When the Sync tab is opened,
         # the buttons are (re)created with n_clicks=None, which can trigger this
@@ -863,55 +584,6 @@ _BG   = "rgba(0,0,0,0)"
 _FONT = dict(family="Inter,system-ui,sans-serif", size=11)
 _MAR  = dict(l=40, r=20, t=36, b=40)
 _H    = 300
-
-
-def _make_risk_charts(df: pd.DataFrame) -> html.Div:
-    fig_dist = fig_vel = go.Figure()
-    fig_dist.update_layout(paper_bgcolor=_BG, plot_bgcolor=_BG, height=_H, font=_FONT,
-                            margin=_MAR,
-                            annotations=[dict(text="No district data", xref="paper",
-                                              yref="paper", x=0.5, y=0.5,
-                                              showarrow=False, font=dict(color="#aaa"))])
-    fig_vel.update_layout(paper_bgcolor=_BG, plot_bgcolor=_BG, height=_H, font=_FONT,
-                           margin=_MAR,
-                           annotations=[dict(text="No velocity data", xref="paper",
-                                             yref="paper", x=0.5, y=0.5,
-                                             showarrow=False, font=dict(color="#aaa"))])
-
-    if "district" in df.columns:
-        grp = df.groupby(["district", "risk_level"]).size().reset_index(name="n")
-        if not grp.empty:
-            fig_dist = px.bar(
-                grp, x="district", y="n", color="risk_level",
-                color_discrete_map={"HIGH": "#C0392B", "MEDIUM": "#F39C12"},
-                title="At-Risk by District",
-                labels={"n": "Children", "district": "", "risk_level": "Risk"},
-                barmode="stack",
-            )
-            fig_dist.update_layout(paper_bgcolor=_BG, plot_bgcolor=_BG,
-                                   font=_FONT, margin=_MAR, height=_H, legend_title="")
-
-    if "weight_velocity" in df.columns:
-        v = pd.to_numeric(df["weight_velocity"], errors="coerce").dropna()
-        if len(v):
-            fig_vel = px.histogram(
-                v, nbins=30, title="Weight Velocity Distribution (kg/month)",
-                color_discrete_sequence=[_RED],
-                labels={"value": "kg/month", "count": "Children"},
-            )
-            fig_vel.add_vline(x=0, line_color="#2C3E50", line_dash="dash",
-                              annotation_text="Zero growth")
-            fig_vel.update_layout(paper_bgcolor=_BG, plot_bgcolor=_BG,
-                                  font=_FONT, margin=_MAR, height=_H, showlegend=False)
-
-    def _c(fig):
-        return dbc.Card(dbc.CardBody(
-            dcc.Graph(figure=fig, config={"displayModeBar": False},
-                      style={"height": f"{_H}px"}), className="p-2"),
-            className="border-0 shadow-sm mb-3", style={"borderRadius": "8px"})
-
-    return dbc.Row([dbc.Col(_c(fig_dist), md=7),
-                    dbc.Col(_c(fig_vel),  md=5)], className="g-3 mb-3")
 
 
 def _missed_chart(df: pd.DataFrame) -> html.Div:

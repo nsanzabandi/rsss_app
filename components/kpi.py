@@ -1,7 +1,7 @@
 """
 components/kpi.py — KPI card builder for the RSSS dashboard.
 """
-from dash import html
+from dash import dcc, html
 import dash_bootstrap_components as dbc
 
 C_PRIMARY = "#C0392B"
@@ -64,9 +64,13 @@ def metric_card(
     sub: str = "",
     color: str = C_PRIMARY,
     icon: str = "",
+    href: str | None = None,
+    xl=3,
+    delta: dict | None = None,
 ) -> dbc.Col:
-    """Modern headline KPI card: soft icon chip + bold value + label."""
-    return dbc.Col(
+    """Modern headline KPI card: soft icon chip + bold value + label.
+    href → the whole card is a link (with a hover lift and a 'View' hint)."""
+    card = (
         dbc.Card(
             dbc.CardBody(
                 html.Div([
@@ -89,17 +93,34 @@ def metric_card(
                             "whiteSpace": "nowrap"}),
                         html.Div(sub, className="text-muted",
                                  style={"fontSize": "0.7rem"}) if sub else None,
+                        delta_badge(delta) if delta else None,
                     ], style={"minWidth": 0}),
                 ], className="d-flex align-items-center", style={"gap": "0.8rem"}),
                 className="py-3 px-3",
             ),
-            className="border-0 h-100",
+            className="border-0 h-100" + (" nhic-card-link" if href else ""),
             style={"borderRadius": "14px",
                    "boxShadow": "0 2px 12px rgba(31,42,55,.07)", "background": "#fff"},
-        ),
-        xs=6, md=4, xl=3,
-        className="mb-2",
+        )
     )
+    if href:
+        card = dcc.Link(card, href=href, className="text-decoration-none d-block h-100",
+                        title="Open the at-risk dashboard for this selection")
+    return dbc.Col(card, xs=6, md=4, xl=xl, className="mb-2")
+
+
+def delta_badge(d: dict) -> html.Div:
+    """▲/▼ change vs the previous period. For every card that uses it, a RISE
+    is bad (red flag) and a FALL is good (green flag).
+    d = {"text": "+3,888 (+9.2%)", "dir": "up"|"down"|"flat",
+         "detail": "vs Apr–Jun 2026: 42,405"}"""
+    arrow, cls = {"up": ("▲", "nhic-delta-up"), "down": ("▼", "nhic-delta-down")}.get(
+        d.get("dir"), ("▬", "nhic-delta-flat"))
+    if d.get("text") == "data still arriving":
+        arrow = "⏳"
+    return html.Div([html.Span([arrow, " ", d["text"]], className=f"nhic-delta {cls}"),
+                     html.Div(d.get("detail", ""), className="nhic-delta-vs")],
+                    className="mt-1")
 
 
 def kpi_placeholder() -> dbc.Col:
