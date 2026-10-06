@@ -27,6 +27,10 @@ warnings.filterwarnings('ignore', '.*pandas only supports SQLAlchemy.*')
 TEI        = "tracked_entity_instance"
 _CSV_PATH  = Path(__file__).parent / "data" / "combined_df.csv"
 _CACHE_TTL = 3600   # 1 hour
+# get_df()'s table only changes when an eTracker sync runs, and
+# refresh_after_sync() reloads it then — so no need to re-read it hourly (each
+# re-read is ~14s of heavy work that slows every visitor while it runs).
+_DF_TTL = 24 * 3600
 
 _cache: dict = {}
 _lock  = threading.Lock()
@@ -209,10 +213,50 @@ def _normalise(df: pd.DataFrame) -> pd.DataFrame:
 
 # ── Public cache API ───────────────────────────────────────────────────────────
 
-def get_df() -> pd.DataFrame | None:
-    """Return cached stunted-children DataFrame, reloading if stale."""
+_df_reloading = threading.Event()
+
+
+def _reload_df_background() -> None:
+    if _df_reloading.is_set():
+        return
+    _df_reloading.set()
+
+    def _work():
+        try:
+            df = _load_from_db()
+            if df is None:
+                df = _load_from_csv()
+            if df is not None:
+                with _lock:
+                    _cache["df"], _cache["ts"] = df, time.time()
+                    _cache["source"] = "postgresql" if len(df) > 0 else "csv"
+        finally:
+            _df_reloading.clear()
+    threading.Thread(target=_work, daemon=True).start()
+
+
+def get_df_if_ready() -> pd.DataFrame | None:
+    """get_df()'s table if it's already in memory, else None — and start
+    loading it in the background. Never blocks (the load takes ~14s)."""
     with _lock:
-        if not ("df" in _cache and (time.time() - _cache.get("ts", 0)) < _CACHE_TTL):
+        df = _cache.get("df")
+        stale = (time.time() - _cache.get("ts", 0)) >= _DF_TTL
+    if df is None or stale:
+        _reload_df_background()
+    return df
+
+
+def get_df() -> pd.DataFrame | None:
+    """Return cached stunted-children DataFrame. When it's older than the TTL,
+    the old copy is served while a fresh one loads in the background (the load
+    takes ~14s) — only the very first call after startup has to wait."""
+    with _lock:
+        if "df" in _cache and _cache["df"] is not None:
+            if (time.time() - _cache.get("ts", 0)) >= _DF_TTL:
+                _reload_df_background()
+            return _cache["df"]
+    with _lock:
+        if not ("df" in _cache and (time.time() - _cache.get("ts", 0)) < _DF_TTL):
             df = _load_from_db()
             if df is None:
                 df = _load_from_csv()
@@ -378,10 +422,12 @@ SELECT
     weight_visit_kg          AS weight_at_visit_kg,
     stunting_status,
     immunization_schedule,
+    muac_cm, wasting_status,
     bcg, opv, hep_b_birth, dpt_hepb_hib,
     pneumococcal, rotavirus, measles_rubella, hpv,
     COALESCE(h_district, residence_district, district_source) AS district,
     h_district_hospital      AS district_hospital,
+    health_facility,
     residence_province       AS province
 FROM immunization_vaccination
 """
@@ -474,6 +520,8 @@ def _disk_cache_paths() -> dict:
         "monthly":  _DISK_CACHE_DIR / "monthly.pkl",
         "schedule": _DISK_CACHE_DIR / "schedule.pkl",
         "visits":   _DISK_CACHE_DIR / "visits.pkl",
+        "risk":     _DISK_CACHE_DIR / "risk.pkl",
+        "risk_monthly": _DISK_CACHE_DIR / "risk_monthly.pkl",
         "meta":     _DISK_CACHE_DIR / "meta.json",
     }
 
@@ -494,9 +542,20 @@ def _write_meta(meta: dict) -> None:
     os.replace(tmp, path)
 
 
+def _date_sorted(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
+    """Sort once by visit date (+ tie-breaker) so period queries can take each
+    child's latest row with drop_duplicates(keep="last") and no per-request
+    sort — that sort was ~1s per dashboard refresh on 0.5M+ rows."""
+    if df is None or df.empty:
+        return df
+    cols = [c for c in cols if c in df.columns]
+    return df.sort_values(cols, kind="mergesort").reset_index(drop=True)
+
+
 def save_child_cache_to_disk(child: pd.DataFrame, monthly: pd.DataFrame,
                              schedule: pd.DataFrame, visits: pd.DataFrame,
-                             data_as_of: str | None = None) -> None:
+                             data_as_of: str | None = None,
+                             risk: pd.DataFrame | None = None) -> None:
     """Persist the built tables to disk and update the in-memory cache.
 
     data_as_of: DB MAX(fetched_at) read before the build — the watermark the
@@ -507,8 +566,13 @@ def save_child_cache_to_disk(child: pd.DataFrame, monthly: pd.DataFrame,
     import os
     _DISK_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     paths = _disk_cache_paths()
+    risk = risk if risk is not None else pd.DataFrame()
+    visits = _date_sorted(visits, ["immunization_date", "event_id"])
+    risk = _date_sorted(risk, ["immunization_date"])
+    risk_monthly = _aggregate_risk(risk)
     for key, frame in (("child", child), ("monthly", monthly),
-                       ("schedule", schedule), ("visits", visits)):
+                       ("schedule", schedule), ("visits", visits),
+                       ("risk", risk), ("risk_monthly", risk_monthly)):
         tmp = paths[key].with_suffix(".tmp")
         frame.to_pickle(tmp)
         os.replace(tmp, paths[key])
@@ -520,8 +584,13 @@ def save_child_cache_to_disk(child: pd.DataFrame, monthly: pd.DataFrame,
         _child_cache["monthly"]  = monthly
         _child_cache["schedule"] = schedule
         _child_cache["visits"]   = visits
+        _child_cache["risk"]     = risk
+        _child_cache["risk_monthly"] = risk_monthly
         _child_cache["ts"]       = built_at
         _child_state["status"]   = "done"
+    if not risk.empty:
+        _risk_latest(risk)
+    _prewarm_default_views()
 
 
 def _refresh_from_disk_if_newer() -> bool:
@@ -549,6 +618,13 @@ def _refresh_from_disk_if_newer() -> bool:
         monthly  = pd.read_pickle(paths["monthly"])
         schedule = pd.read_pickle(paths["schedule"])
         visits   = pd.read_pickle(paths["visits"])
+        risk     = pd.read_pickle(paths["risk"]) if paths["risk"].exists() else pd.DataFrame()
+        risk_monthly = (pd.read_pickle(paths["risk_monthly"])
+                        if paths["risk_monthly"].exists() else pd.DataFrame())
+        if not visits["immunization_date"].is_monotonic_increasing:
+            visits = _date_sorted(visits, ["immunization_date", "event_id"])
+        if not risk.empty and not risk["immunization_date"].is_monotonic_increasing:
+            risk = _date_sorted(risk, ["immunization_date"])
     except Exception as exc:
         print(f"[data] disk cache read failed: {exc}")
         return False
@@ -557,8 +633,13 @@ def _refresh_from_disk_if_newer() -> bool:
         _child_cache["monthly"]  = monthly
         _child_cache["schedule"] = schedule
         _child_cache["visits"]   = visits
+        _child_cache["risk"]     = risk
+        _child_cache["risk_monthly"] = risk_monthly
         _child_cache["ts"]       = built_at
         _child_state["status"]   = "done"
+    if not risk.empty:
+        _risk_latest(risk)          # pre-collapse so the first at-risk view is instant
+    _prewarm_default_views()
     print(f"[data] Loaded child-level cache from disk ({len(child):,} children, "
           f"built {(time.time()-built_at)/60:.0f} min ago).")
     return True
@@ -617,16 +698,22 @@ def _build_child_and_monthly(
     except Exception as exc:
         print(f"[data] missed-doses skipped: {exc}")
 
-    child["under_risk"] = False
+    # Growth risk (early warning) per visit; each child's CURRENT risk is the
+    # one at their latest weighed visit — a child who recovered isn't flagged.
+    risk = pd.DataFrame()
+    child["risk_level"], child["risk_flags"], child["under_risk"] = "OK", 0, False
     try:
-        from core.risk_classifier import classify_at_risk
-        at = classify_at_risk(meas)
-        rtei = "entity_id" if "entity_id" in at.columns else TEI
-        if rtei in at.columns:
-            child["under_risk"] = child.index.isin(set(at[rtei].dropna().unique()))
+        risk = _build_risk_visits(meas, valid)
+        if not risk.empty:
+            lr = (risk.sort_values("immunization_date", kind="mergesort")
+                      .drop_duplicates(TEI, keep="last").set_index(TEI))
+            child["risk_level"] = lr["risk_level"].astype(object).reindex(child.index).fillna("OK")
+            child["risk_flags"] = lr["risk_flags"].reindex(child.index).fillna(0).astype("int16")
+            child["under_risk"] = child["risk_level"].isin(["HIGH", "MEDIUM"])
     except Exception as exc:
-        print(f"[data] under-risk skipped: {exc}")
+        print(f"[data] growth-risk skipped: {exc}")
 
+    child["sex"] = _sex_label(base[rc["sex"]]) if rc.get("sex") else None
     child = child.reset_index().rename(columns={tei: "tracked_entity_instance"})
 
     # ── slim visit-level table for PERIOD-scoped queries ──────────────────────
@@ -650,16 +737,71 @@ def _build_child_and_monthly(
     visits["immunization_date"] = valid["_o"]
     visits["is_stunted"] = valid["haz_calc"] < -2
     visits["is_severe"]  = valid["haz_calc"] < -3
+    visits["sex"] = _sex_label(valid[rc["sex"]]).to_numpy() if rc.get("sex") else None
     visits = _compact(visits.rename(columns={tei: TEI}))
 
     monthly, schedule = _aggregate_visits(visits)
-    return child, monthly, schedule, visits
+    return child, monthly, schedule, visits, risk
+
+
+def _build_risk_visits(meas: pd.DataFrame, valid: pd.DataFrame) -> pd.DataFrame:
+    """Slim per-visit growth-risk table: one row per weighed visit with risk
+    level, reason flags (core.risk_classifier.REASONS), weight velocity, age,
+    area, and whether that same visit measured the child as stunted."""
+    from core.risk_classifier import classify_visits
+    r = classify_visits(meas)
+    if r is None or r.empty:
+        return pd.DataFrame()
+    out = pd.DataFrame({TEI: r[TEI].to_numpy(),
+                        "immunization_date": pd.to_datetime(r["immunization_date"]).to_numpy()})
+    for c in ("province", "district", "district_hospital", "health_facility"):
+        if c in r.columns:
+            out[c] = r[c].to_numpy()
+    out["risk_level"]      = pd.Categorical(r["risk_level"].to_numpy(), categories=["OK", "MEDIUM", "HIGH"])
+    out["risk_flags"]      = r["risk_flags"].to_numpy().astype("int16")
+    out["weight_velocity"] = pd.to_numeric(r["weight_velocity"], errors="coerce").to_numpy().astype("float32")
+    out["age_months"]      = pd.to_numeric(r["_age"], errors="coerce").to_numpy().astype("float32")
+    if "event_id" in r.columns and "event_id" in valid.columns:
+        stunted = valid.drop_duplicates("event_id").set_index("event_id")["_stunted"]
+        out["is_stunted"] = r["event_id"].map(stunted).to_numpy()
+    return _compact(out)
+
+
+def _aggregate_risk(risk: pd.DataFrame) -> pd.DataFrame:
+    """Month × area at-risk counts (each child's latest weighed visit that
+    month) for the at-risk trend chart."""
+    if risk is None or risk.empty:
+        return pd.DataFrame()
+    geo = [c for c in ("province", "district", "district_hospital", "health_facility")
+           if c in risk.columns]
+    today = pd.Timestamp.today().normalize()
+    rv = risk[risk["immunization_date"].notna() & (risk["immunization_date"] <= today)].copy()
+    rv["month"] = rv["immunization_date"].dt.to_period("M").dt.to_timestamp()
+    rv = (rv.sort_values("immunization_date", kind="mergesort")
+            .drop_duplicates(subset=[TEI, "month"], keep="last"))
+    rv["_high"] = rv["risk_level"].eq("HIGH")
+    rv["_med"]  = rv["risk_level"].eq("MEDIUM")
+    m = (rv.groupby(["month"] + geo, dropna=False, observed=True)
+           .agg(measured=(TEI, "size"), high=("_high", "sum"), medium=("_med", "sum"))
+           .reset_index())
+    for c in geo:
+        m[c] = m[c].astype(object)
+    return m
 
 
 # Repeated text columns in the visits table — stored as categoricals, which
 # keeps ~3.5M rows from costing hundreds of MB of duplicate strings.
 _VISIT_CAT_COLS = ("province", "district", "district_hospital",
-                   "health_facility", "immunization_schedule")
+                   "health_facility", "immunization_schedule", "sex")
+
+
+def _sex_label(series: pd.Series) -> pd.Series:
+    """'Male' / 'Female' / None — same token list as the WHO HAZ calculation
+    (core/stunting_calculator._sex_code: English, French, Kinyarwanda)."""
+    from core.stunting_calculator import _sex_code
+    code = _sex_code(series)
+    return pd.Series(np.where(code == 1, "Male", np.where(code == 2, "Female", None)),
+                     index=series.index)
 
 
 def _compact(visits: pd.DataFrame) -> pd.DataFrame:
@@ -746,6 +888,75 @@ def get_visits_df() -> pd.DataFrame | None:
     return None
 
 
+def get_risk_df() -> pd.DataFrame | None:
+    """Per-visit growth-risk table (see _build_risk_visits)."""
+    _refresh_from_disk_if_newer()
+    with _child_lock:
+        if "risk" in _child_cache and (time.time() - _child_cache.get("ts", 0)) < _DISK_CACHE_MAX_AGE:
+            return _child_cache["risk"]
+    return None
+
+
+def get_risk_monthly_df() -> pd.DataFrame | None:
+    _refresh_from_disk_if_newer()
+    with _child_lock:
+        if "risk_monthly" in _child_cache and (time.time() - _child_cache.get("ts", 0)) < _DISK_CACHE_MAX_AGE:
+            return _child_cache["risk_monthly"]
+    return None
+
+
+_risk_latest_memo: dict = {}
+
+
+def _risk_latest(risk: pd.DataFrame) -> pd.DataFrame:
+    """Each child's latest weighed visit, computed once per risk table."""
+    key = id(risk)
+    if _risk_latest_memo.get("key") != key:
+        latest = (risk.sort_values("immunization_date", kind="mergesort")
+                      .drop_duplicates(TEI, keep="last"))
+        _risk_latest_memo.clear()
+        _risk_latest_memo.update(key=key, df=latest)
+    return _risk_latest_memo["df"]
+
+
+def scoped_risk_df(risk: pd.DataFrame | None, user: dict, province=None, district=None,
+                   hospital=None, start: str | None = None, end: str | None = None) -> pd.DataFrame:
+    """One row per child: their growth risk at their LATEST weighed visit
+    within the date window, limited to the user's area + dashboard filters."""
+    if risk is None or risk.empty:
+        return pd.DataFrame()
+    if _covers_all(risk, start, end):
+        # Whole data range: each child's latest visit overall, collapsed once
+        # per cache refresh (same shortcut as scoped_child_df).
+        latest = _risk_latest(risk)
+        return filter_geo(filter_by_user(latest, user), province, district, hospital)
+    r = filter_geo(filter_by_user(risk, user), province, district, hospital)
+    if start:
+        r = r[r["immunization_date"] >= pd.Timestamp(start)]
+    if end:
+        r = r[r["immunization_date"] <= pd.Timestamp(end)]
+    if r.empty:
+        return r
+    return r.drop_duplicates(TEI, keep="last")      # risk table is date-sorted
+
+
+def summarize_risk(r: pd.DataFrame) -> dict:
+    from core.risk_classifier import REASONS
+    if r is None or r.empty:
+        return dict(measured=0, at_risk=0, high=0, medium=0, pct=0.0, stunted_at_risk=0,
+                    reasons={})
+    at = r[r["risk_level"].isin(["HIGH", "MEDIUM"])]
+    flags = at["risk_flags"].to_numpy()
+    return dict(
+        measured=len(r), at_risk=len(at),
+        high=int((at["risk_level"] == "HIGH").sum()),
+        medium=int((at["risk_level"] == "MEDIUM").sum()),
+        pct=round(len(at) / max(len(r), 1) * 100, 1),
+        stunted_at_risk=int(at["is_stunted"].eq(True).sum()) if "is_stunted" in at.columns else 0,
+        reasons={label: int(((flags & bit) > 0).sum()) for bit, label in REASONS.items()},
+    )
+
+
 def get_monthly_df_stale_ok() -> pd.DataFrame | None:
     """Like get_monthly_df(), but ignores the normal freshness ceiling.
 
@@ -808,7 +1019,10 @@ def warm_child_level() -> None:
 # those children's full histories and merge them into the cached tables.
 
 _FULL_REBUILD_SHARE = 0.4    # if this share of children changed, a full rebuild is cheaper
-_CACHE_FORMAT       = 2      # bump when the cached tables' shape changes → forces one full rebuild
+_CACHE_FORMAT       = 5      # bump when the cached tables' shape changes → forces one full rebuild
+                             # (5: child sex, for the dashboard's boys/girls split)
+                             # (4: per-visit growth-risk table for the at-risk dashboard)
+                             # (3: health_facility added so health-centre scoping works)
 
 
 def _db_data_version() -> str | None:
@@ -840,6 +1054,30 @@ def _changed_children(since: str) -> list[str] | None:
     except Exception as exc:
         print(f"[data] could not list changed children: {exc}")
         return None
+
+
+def _build(ids: list | None):
+    """Load measurements (all, or these children's full histories) and build
+    the cached tables — with the Polars build (core/fast_build.py, ~10× faster)
+    when available, else the original pandas build."""
+    try:
+        from core import fast_build
+    except ImportError:
+        fast_build = None
+    if fast_build is not None:
+        try:
+            meas = fast_build.load_measurements(ids)
+            if meas is None:
+                raise RuntimeError("no measurements available")
+            return fast_build.build_tables(meas)
+        except RuntimeError:
+            raise
+        except Exception as exc:                     # never let the fast path take the app down
+            print(f"[data] fast build failed ({exc}) — using the pandas build")
+    meas = _load_measurements(ids)
+    if meas is None or meas.empty:
+        raise RuntimeError("no measurements available")
+    return _build_child_and_monthly(meas)
 
 
 def update_child_cache(full: bool = False) -> str:
@@ -875,11 +1113,8 @@ def update_child_cache(full: bool = False) -> str:
 
     t0 = time.time()
     if ids is None:
-        meas = _load_measurements()
-        if meas is None or meas.empty:
-            raise RuntimeError("no measurements available")
-        child, monthly, schedule, visits = _build_child_and_monthly(meas)
-        save_child_cache_to_disk(child, monthly, schedule, visits, data_as_of=version)
+        child, monthly, schedule, visits, risk = _build(None)
+        save_child_cache_to_disk(child, monthly, schedule, visits, data_as_of=version, risk=risk)
         print(f"[data] Child cache FULL rebuild: {len(child):,} children in {time.time()-t0:.0f}s")
         return "full"
 
@@ -895,17 +1130,20 @@ def update_child_cache(full: bool = False) -> str:
         print("[data] Child cache already up to date.")
         return "unchanged"
 
-    meas = _load_measurements(ids)
-    if meas is None:
-        raise RuntimeError("could not load changed children")
-    c_new, _, _, v_new = _build_child_and_monthly(meas)
+    c_new, _, _, v_new, r_new = _build(ids)
     ids_set = set(ids)
     child  = pd.concat([child[~child[TEI].isin(ids_set)], c_new], ignore_index=True)
     visits = _compact(pd.concat([visits[~visits[TEI].isin(ids_set)], v_new], ignore_index=True))
+    risk_old = pd.read_pickle(paths["risk"]) if paths["risk"].exists() else pd.DataFrame()
+    risk = _compact(pd.concat([risk_old[~risk_old[TEI].isin(ids_set)] if not risk_old.empty else risk_old,
+                               r_new], ignore_index=True))
+    if "risk_level" in risk.columns:
+        risk["risk_level"] = pd.Categorical(risk["risk_level"].astype(object),
+                                            categories=["OK", "MEDIUM", "HIGH"])
     monthly, schedule = _aggregate_visits(visits)
-    save_child_cache_to_disk(child, monthly, schedule, visits, data_as_of=version)
+    save_child_cache_to_disk(child, monthly, schedule, visits, data_as_of=version, risk=risk)
     print(f"[data] Child cache INCREMENTAL update: {len(ids):,} changed children "
-          f"({len(meas):,} visits) in {time.time()-t0:.0f}s")
+          f"in {time.time()-t0:.0f}s")
     return "incremental"
 
 
@@ -1021,11 +1259,10 @@ def build_period_child_df(visits: pd.DataFrame | None,
         return pd.DataFrame()
 
     tei = "tracked_entity_instance"
-    ever = v.groupby(tei)["is_stunted"].max()
-    _sort_cols = ["immunization_date", "event_id"] if "event_id" in v.columns else ["immunization_date"]
-    latest = (v.sort_values(_sort_cols)
-               .drop_duplicates(subset=[tei], keep="last")
-               .set_index(tei))
+    ever = v.groupby(tei, sort=False)["is_stunted"].max()
+    # visits are kept sorted by (date, event_id) — see _date_sorted — so the
+    # last row per child is their latest visit in the window; no sort needed.
+    latest = v.drop_duplicates(subset=[tei], keep="last").set_index(tei)
     latest["ever_stunted"] = ever.reindex(latest.index)
     # missed-dose / at-risk flags are current-state concepts (computed from a
     # child's overall latest visit + full growth history), not period-scoped —
@@ -1048,23 +1285,148 @@ def build_period_child_df(visits: pd.DataFrame | None,
 _NARROW_RANGE_DAYS = 180
 
 
+def _covers_all(frame: pd.DataFrame | None, start, end) -> bool:
+    """True when the date window includes every visit — only then may the
+    collapsed latest-visit-ever tables stand in for a real period query.
+    (Previously ANY window over 180 days took that shortcut, so "Year 2025"
+    silently showed all-time figures.) Tables are date-sorted, so first/last
+    rows are the date range."""
+    if frame is None or frame.empty or (not start and not end):
+        return True
+    first, last = frame["immunization_date"].iloc[0], frame["immunization_date"].iloc[-1]
+    last = min(last, pd.Timestamp.today().normalize())     # ignore future-dated typos
+    try:
+        return ((not start or pd.Timestamp(start) <= first) and
+                (not end or pd.Timestamp(end) >= last))
+    except Exception:
+        return False
+
+
+_scope_memo: dict = {}
+_SCOPE_MEMO_MAX = 6                 # full per-child tables are large — keep a few
+_scope_memo_lock = threading.Lock()
+_scope_inflight: dict = {}          # key → Event while someone is computing it
+
+
+def memo_scoped(kind: str, user: dict, province=None, district=None, hospital=None,
+                start=None, end=None):
+    """scoped_child_df / scoped_risk_df, remembered per (data version, user's
+    area, filters, dates). Everyone opening the same view — e.g. every public
+    visitor on the default national quarter — shares one computation; the
+    memo resets whenever the cache is rebuilt."""
+    ts = _child_cache.get("ts")
+    role = user.get("role")
+    area = {"district": user.get("district"), "hospital": user.get("hospital"),
+            "health_center": user.get("health_center")}.get(role)
+    scope = "national" if role in ("ministry", "public") else role   # same figures → share
+    frame = get_visits_df() if kind == "child" else get_risk_df()
+    if _covers_all(frame, start, end):
+        start = end = None                    # any whole-data range is the same "All time"
+    key = (kind, ts, scope, area, province, district, hospital, start, end)
+    while True:
+        with _scope_memo_lock:
+            if key in _scope_memo:
+                _scope_memo[key] = _scope_memo.pop(key)      # most recently used
+                return _scope_memo[key]
+            ev = _scope_inflight.get(key)
+            if ev is None:                                   # nobody computing it → we do
+                ev = _scope_inflight[key] = threading.Event()
+                break
+        ev.wait(timeout=120)          # someone else is computing this exact view — reuse it
+    try:
+        if kind == "child":
+            out = scoped_child_df(get_child_df(), get_visits_df(), user, province, district,
+                                  hospital, start, end)
+        else:
+            out = scoped_risk_df(get_risk_df(), user, province, district, hospital, start, end)
+        with _scope_memo_lock:
+            if any(k[1] != ts for k in _scope_memo):        # data changed → drop old entries
+                _scope_memo.clear()
+            _scope_memo[key] = out
+            while len(_scope_memo) > _SCOPE_MEMO_MAX:
+                _scope_memo.pop(next(iter(_scope_memo)))
+        return out
+    finally:
+        with _scope_memo_lock:
+            _scope_inflight.pop(key, None)
+        ev.set()
+
+
+def _prewarm_default_views() -> None:
+    """In the background, compute what the dashboard opens on — last month vs
+    the month before — then Last 3 months and All time, so the first visitor
+    after a (re)load doesn't wait."""
+    def _work():
+        try:
+            today = pd.Timestamp.today().normalize()
+            ly = today - pd.DateOffset(years=1)
+            user = {"role": "public"}
+            # default view: last month, and the month before (▲/▼)
+            m0 = today.replace(day=1)
+            lm = m0.to_period("M") - 1
+            for per in (lm, lm - 1):
+                a, b = per.start_time, per.end_time.normalize()
+                memo_summary("child", user, start=f"{a:%Y-%m-%d}", end=f"{b:%Y-%m-%d}")
+                memo_summary("risk", user, start=f"{a:%Y-%m-%d}", end=f"{b:%Y-%m-%d}")
+            # then Last 3 months vs the 3 before
+            for k in (3, 6):
+                a = (m0.to_period("M") - k).to_timestamp()
+                b = (m0.to_period("M") - k + 3).to_timestamp() - pd.Timedelta(days=1)
+                memo_summary("child", user, start=f"{a:%Y-%m-%d}", end=f"{b:%Y-%m-%d}")
+                memo_summary("risk", user, start=f"{a:%Y-%m-%d}", end=f"{b:%Y-%m-%d}")
+            memo_summary("child", user); memo_summary("risk", user)        # All time totals
+            # the default view's ▲/▼: this year so far vs the same dates last year
+            for a, b in ((f"{today.year}-01-01", f"{today:%Y-%m-%d}"),
+                         (f"{ly.year}-01-01", f"{ly:%Y-%m-%d}")):
+                memo_summary("child", user, start=a, end=b)
+                memo_summary("risk", user, start=a, end=b)
+        except Exception as exc:
+            print(f"[data] pre-warm skipped: {exc}")
+    threading.Thread(target=_work, daemon=True).start()
+
+
+_summary_memo: dict = {}
+_SUMMARY_MEMO_MAX = 400             # card figures are a few numbers — keep many
+
+
+def memo_summary(kind: str, user: dict, province=None, district=None, hospital=None,
+                 start=None, end=None) -> dict:
+    """The KPI figures (summarize_children / summarize_risk) for a view,
+    remembered per data version — switching back to a period seen before is
+    instant, without keeping its full table in memory."""
+    ts = _child_cache.get("ts")
+    role = user.get("role")
+    scope = "national" if role in ("ministry", "public") else role
+    area = {"district": user.get("district"), "hospital": user.get("hospital"),
+            "health_center": user.get("health_center")}.get(role)
+    frame = get_visits_df() if kind == "child" else get_risk_df()
+    if _covers_all(frame, start, end):
+        start = end = None
+    key = (kind, ts, scope, area, province, district, hospital, start, end)
+    with _scope_memo_lock:
+        if key in _summary_memo:
+            return _summary_memo[key]
+    df = memo_scoped(kind, user, province, district, hospital, start, end)
+    out = summarize_children(df) if kind == "child" else summarize_risk(df)
+    with _scope_memo_lock:
+        if any(k[1] != ts for k in _summary_memo):
+            _summary_memo.clear()
+        _summary_memo[key] = out
+        while len(_summary_memo) > _SUMMARY_MEMO_MAX:
+            _summary_memo.pop(next(iter(_summary_memo)))
+    return out
+
+
 def scoped_child_df(child: pd.DataFrame | None, visits: pd.DataFrame | None,
                     user: dict, province=None, district=None, hospital=None,
                     start: str | None = None, end: str | None = None) -> pd.DataFrame:
     """One-stop, correctly-and-cheaply-scoped per-child view for the dashboard.
 
-    Picks build_period_child_df() (correct, more expensive) for a narrow date
-    window, or the pre-collapsed child table (cheap) for a wide/default one —
-    see _NARROW_RANGE_DAYS. Applies user/geo filters to whichever it picks.
+    Uses the pre-collapsed child table (cheap) only when the window covers all
+    the data (see _covers_all); any real window, short or long, goes through
+    build_period_child_df(). Applies user/geo filters to whichever it picks.
     """
-    narrow = False
-    if start and end:
-        try:
-            narrow = (pd.Timestamp(end) - pd.Timestamp(start)).days < _NARROW_RANGE_DAYS
-        except Exception:
-            narrow = False
-
-    if narrow and visits is not None:
+    if not _covers_all(visits, start, end) and visits is not None:
         v = filter_by_user(visits, user)
         v = filter_geo(v, province, district, hospital)
         return build_period_child_df(v, start, end)
@@ -1116,15 +1478,18 @@ def filter_by_user(df: pd.DataFrame, user: dict) -> pd.DataFrame:
     hospital = user.get("hospital")
     hc       = user.get("health_center")
 
-    if role == "ministry":
+    if role in ("ministry", "public"):
         return df
-    if role == "district" and district and "district" in df.columns:
-        return df[df["district"] == district].copy()
-    if role == "hospital" and hospital and "district_hospital" in df.columns:
-        return df[df["district_hospital"] == hospital].copy()
-    if role == "health_center" and hc and "health_facility" in df.columns:
-        return df[df["health_facility"] == hc].copy()
-    return df
+    # Fail CLOSED: if the user's area can't be applied (scope value or column
+    # missing, unknown role), return nothing — never the whole country. This
+    # used to fall through to `return df`, so health-centre users saw national
+    # data wherever a table had no health_facility column.
+    col, val = {"district":      ("district", district),
+                "hospital":      ("district_hospital", hospital),
+                "health_center": ("health_facility", hc)}.get(role, (None, None))
+    if not col or not val or col not in df.columns:
+        return df.iloc[0:0].copy()
+    return df[df[col] == val].copy()
 
 
 # ── Date filter ────────────────────────────────────────────────────────────────
@@ -1153,8 +1518,8 @@ def filter_by_date(df: pd.DataFrame, start: str | None, end: str | None) -> pd.D
 # ── Geographic filter ──────────────────────────────────────────────────────────
 
 def filter_geo(df: pd.DataFrame, province=None, district=None, hospital=None) -> pd.DataFrame:
-    if df is None or df.empty:
-        return df
+    if df is None or df.empty or not (province or district or hospital):
+        return df          # nothing to filter — no copy (tables can be 1M+ rows)
     if province and "province" in df.columns:
         df = df[df["province"] == province]
     if district and "district" in df.columns:

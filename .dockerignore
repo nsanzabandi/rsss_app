@@ -24,3 +24,12 @@ data/
 
 docker-compose.yml
 Dockerfile
+
+# Database dumps / restore leftovers — never bake children's data into the image
+*.sql
+*.sql.gz
+*.dump
+*.bak
+*.log
+restore.log
+cache_build.log
