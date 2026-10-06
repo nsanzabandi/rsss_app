@@ -23,10 +23,14 @@ USER rsss
 
 EXPOSE 8050
 
+# gthread (real threads), not gevent: under gevent, background work (post-sync
+# cache refresh, report jobs, risk classifier) is CPU-bound pandas that never
+# yields, so it froze every request until it finished. Still 1 worker — jobs,
+# caches and the schedulers live in-process.
 CMD ["gunicorn", "app:server", \
      "--workers", "1", \
-     "--worker-class", "gevent", \
-     "--threads", "4", \
+     "--worker-class", "gthread", \
+     "--threads", "8", \
      "--timeout", "120", \
      "--bind", "0.0.0.0:8050", \
      "--log-level", "info", \

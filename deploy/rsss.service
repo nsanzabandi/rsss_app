@@ -17,14 +17,14 @@ EnvironmentFile=/opt/rsss_app/.env
 # ── Process ────────────────────────────────────────────────────────────────────
 # -w 1    : single worker — Dash has in-process state (auto-sync thread, cache).
 #           Multiple workers would spawn duplicate background jobs.
-# -k gevent --threads 4 : gevent async I/O handles concurrent DB + callback
-#           requests without blocking the single worker.
+# -k gthread --threads 8 : real threads, so CPU-bound background work
+#           (cache refresh, reports) doesn't freeze requests the way gevent did.
 # --timeout 120 : allow slow DB queries (e.g. full-table stunting aggregation)
 #           without gunicorn killing the worker.
 ExecStart=/opt/rsss_app/.venv/bin/gunicorn app:server \
     --workers 1 \
-    --worker-class gevent \
-    --threads 4 \
+    --worker-class gthread \
+    --threads 8 \
     --timeout 120 \
     --bind 127.0.0.1:8050 \
     --log-level info \
