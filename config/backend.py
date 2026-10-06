@@ -72,6 +72,23 @@ def schema() -> dict:
     return _SCHEMAS[active()]
 
 
+def scope_where(user: dict | None, s: dict | None = None) -> tuple[str, list]:
+    """SQL condition limiting rows to the user's own area — the SQL twin of
+    data.filter_by_user(). Fails CLOSED: unknown role or missing area → no rows.
+    Returns ("", []) for national roles (ministry / public aggregates)."""
+    s = s or schema()
+    user = user or {}
+    role = user.get("role")
+    if role in ("ministry", "public"):
+        return "", []
+    col, val = {"district":      (s["district"], user.get("district")),
+                "hospital":      (s["hospital"], user.get("hospital")),
+                "health_center": (s["facility"], user.get("health_center"))}.get(role, (None, None))
+    if not col or not val:
+        return "FALSE", []
+    return f"{col} = %s", [val]
+
+
 def get_conn():
     """Return a psycopg2 connection to the active backend."""
     import psycopg2
@@ -98,6 +115,7 @@ def ensure_followup_table() -> None:
             created_at               TIMESTAMP DEFAULT NOW(),
             UNIQUE (tracked_entity_instance, followup_date)
         );
+        ALTER TABLE stunting_followup ADD COLUMN IF NOT EXISTS recorded_by TEXT;
     """)
     conn.commit()
     cur.close()

@@ -40,6 +40,20 @@ def _db():
     return get_conn()
 
 
+def _me() -> dict:
+    from flask import session
+    return session.get("user") or {}
+
+
+def _and_scope(sql: str, params: list, sc: dict) -> tuple[str, list]:
+    """Append the signed-in user's area to a query that already has WHERE.
+    Every follow-up query goes through this — the browser's filters only
+    narrow WITHIN the user's own area, never beyond it."""
+    from config.backend import scope_where
+    clause, extra = scope_where(_me(), sc)
+    return (sql + f" AND {clause}", list(params) + extra) if clause else (sql, list(params))
+
+
 def _qlist(sql: str, params=None) -> list:
     try:
         conn = _db()
@@ -154,12 +168,16 @@ def _form_card(child: dict) -> dbc.Card:
 
 def _analytics_content() -> html.Div:
     try:
-        from config.backend import ensure_followup_table
+        from config.backend import ensure_followup_table, schema, scope_where
         ensure_followup_table()
+        sc = schema()
+        clause, params = scope_where(_me(), sc)
+        where = (f"WHERE tracked_entity_instance IN (SELECT {sc['tei']} FROM {sc['table']} "
+                 f"WHERE {clause})" if clause else "")
         conn = _db()
         df   = pd.read_sql(
-            "SELECT followup_date, COUNT(*) AS count FROM stunting_followup "
-            "GROUP BY followup_date ORDER BY followup_date", conn)
+            f"SELECT followup_date, COUNT(*) AS count FROM stunting_followup {where} "
+            "GROUP BY followup_date ORDER BY followup_date", conn, params=params or None)
         conn.close()
     except Exception as e:
         return dbc.Alert(f"Could not load analytics: {e}", color="warning")
@@ -207,9 +225,10 @@ def register_callbacks(app) -> None:
             return []
         from config.backend import schema
         s = schema()
-        items = _qlist(
+        sql, params = _and_scope(
             f"SELECT DISTINCT {s['district']} AS district FROM {s['table']} "
-            f"WHERE {s['district']} IS NOT NULL ORDER BY 1")
+            f"WHERE {s['district']} IS NOT NULL", [], s)
+        items = _qlist(sql + " ORDER BY 1", params or None)
         return [{"label": d, "value": d} for d in items]
 
     @app.callback(Output("fu-hospital", "options"),
@@ -221,10 +240,10 @@ def register_callbacks(app) -> None:
             return [], True, None
         from config.backend import schema
         s = schema()
-        items = _qlist(
+        sql, params = _and_scope(
             f"SELECT DISTINCT {s['hospital']} AS hospital FROM {s['table']} "
-            f"WHERE {s['district']}=%s AND {s['hospital']} IS NOT NULL "
-            f"ORDER BY 1", (district,))
+            f"WHERE {s['district']}=%s AND {s['hospital']} IS NOT NULL", [district], s)
+        items = _qlist(sql + " ORDER BY 1", params)
         return [{"label": h, "value": h} for h in items], False, None
 
     @app.callback(Output("fu-sector", "options"),
@@ -236,10 +255,10 @@ def register_callbacks(app) -> None:
             return [], True, None
         from config.backend import schema
         sc = schema()
-        items = _qlist(
+        sql, params = _and_scope(
             f"SELECT DISTINCT {sc['sector']} AS sector FROM {sc['table']} "
-            f"WHERE {sc['hospital']}=%s AND {sc['sector']} IS NOT NULL ORDER BY 1",
-            (hospital,))
+            f"WHERE {sc['hospital']}=%s AND {sc['sector']} IS NOT NULL", [hospital], sc)
+        items = _qlist(sql + " ORDER BY 1", params)
         return [{"label": s, "value": s} for s in items], False, None
 
     @app.callback(Output("fu-facility", "options"),
@@ -252,11 +271,11 @@ def register_callbacks(app) -> None:
             return [], True, None
         from config.backend import schema
         sc = schema()
-        items = _qlist(
+        sql, params = _and_scope(
             f"SELECT DISTINCT {sc['facility']} AS facility FROM {sc['table']} "
             f"WHERE {sc['hospital']}=%s AND {sc['sector']}=%s "
-            f"AND {sc['facility']} IS NOT NULL ORDER BY 1",
-            (hospital, sector))
+            f"AND {sc['facility']} IS NOT NULL", [hospital, sector], sc)
+        items = _qlist(sql + " ORDER BY 1", params)
         return [{"label": f, "value": f} for f in items], False, None
 
     @app.callback(
@@ -282,6 +301,7 @@ def register_callbacks(app) -> None:
         if hospital: sql += f" AND {sc['hospital']}=%s";  params.append(hospital)
         if sector:   sql += f" AND {sc['sector']}=%s";    params.append(sector)
         if facility: sql += f" AND {sc['facility']}=%s";  params.append(facility)
+        sql, params = _and_scope(sql, params, sc)          # never beyond the user's area
         sql += " ORDER BY age_in_months LIMIT 200"
         try:
             conn = _db()
@@ -350,24 +370,38 @@ def register_callbacks(app) -> None:
         prevent_initial_call=True,
     )
     def _save(n, child, fdate, weight, height, interventions, notes):
-        if not child:
+        me = _me()
+        if not me or me.get("readonly"):
+            return dbc.Alert("View-only access can't record follow-ups.", color="warning",
+                             className="py-2")
+        if not child or not child.get("tracked_entity_instance"):
             return dbc.Alert("No child selected.", color="warning", className="py-2")
         try:
-            from config.backend import ensure_followup_table
+            from config.backend import ensure_followup_table, schema
             ensure_followup_table()
+            sc  = schema()
+            tei = child.get("tracked_entity_instance")
             conn = _db()
             cur  = conn.cursor()
+            # The child comes from the browser — confirm on the server that it
+            # really belongs to this user's area before writing anything.
+            sql, params = _and_scope(f"SELECT 1 FROM {sc['table']} WHERE {sc['tei']} = %s",
+                                     [tei], sc)
+            cur.execute(sql + " LIMIT 1", params)
+            if cur.fetchone() is None:
+                conn.close()
+                return dbc.Alert("This child is outside your area.", color="danger", className="py-2")
             cur.execute(
                 "INSERT INTO stunting_followup "
                 "(tracked_entity_instance, followup_date, weight_kg, height_cm, "
-                " interventions, notes, created_at) "
-                "VALUES (%s,%s,%s,%s,%s,%s,NOW()) "
+                " interventions, notes, created_at, recorded_by) "
+                "VALUES (%s,%s,%s,%s,%s,%s,NOW(),%s) "
                 "ON CONFLICT (tracked_entity_instance, followup_date) DO UPDATE "
                 "SET weight_kg=EXCLUDED.weight_kg, height_cm=EXCLUDED.height_cm, "
-                "    interventions=EXCLUDED.interventions, notes=EXCLUDED.notes",
-                (child.get("tracked_entity_instance"), fdate,
-                 weight, height,
-                 json.dumps(interventions or []), notes or ""),
+                "    interventions=EXCLUDED.interventions, notes=EXCLUDED.notes, "
+                "    recorded_by=EXCLUDED.recorded_by",
+                (tei, fdate, weight, height,
+                 json.dumps(interventions or []), notes or "", me.get("username")),
             )
             conn.commit()
             conn.close()

@@ -32,6 +32,32 @@ import dash
 import dash_bootstrap_components as dbc
 from dash import Input, Output, State, html, dcc
 
+# ── Plotly thread safety ───────────────────────────────────────────────────────
+# Plotly Express reads a shared default template that is built lazily on first
+# use. Under gunicorn's gthread worker, two callbacks drawing their first charts
+# at the same moment (typically just after a restart) race on that half-built
+# object → "ValueError: Invalid value". Build it once now, and let px calls take
+# turns (each takes milliseconds).
+def _make_plotly_thread_safe() -> None:
+    import functools
+    import threading
+    import plotly.express as px
+
+    lock = threading.RLock()
+    for name in dir(px):
+        fn = getattr(px, name)
+        if callable(fn) and getattr(fn, "__module__", "") == "plotly.express._chart_types":
+            @functools.wraps(fn)
+            def _locked(*args, _fn=fn, **kwargs):
+                with lock:
+                    return _fn(*args, **kwargs)
+            setattr(px, name, _locked)
+    px.scatter(pd.DataFrame({"x": [0], "y": [0]}), x="x", y="y")   # build the template now
+
+
+_make_plotly_thread_safe()
+
+
 # ── App ────────────────────────────────────────────────────────────────────────
 
 # URL prefix — must match the Nginx location block and all href links.
@@ -46,7 +72,7 @@ app = dash.Dash(
         "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap",
     ],
     suppress_callback_exceptions=True,
-    title="RSSS — Rwanda Stunting Surveillance",
+    title="RSSS · NHIC — Rwanda Stunting Surveillance",
     update_title=None,
     meta_tags=[{"name": "viewport", "content": "width=device-width, initial-scale=1"}],
     # Sub-path mounting — Nginx proxies /rsss_app/ to this gunicorn instance.
@@ -77,7 +103,7 @@ def do_login():
     if user:
         auth_login(user)
         return redirect("/rsss_app/")
-    return redirect("/rsss_app/?login_error=1")
+    return redirect("/rsss_app/login?login_error=1")
 
 @server.route("/rsss_app/logout")
 def logout_route():
@@ -93,7 +119,7 @@ def view_route():
     token = request.args.get("token", "")
     user = user_from_view_token(token)
     if not user:
-        return redirect("/rsss_app/?login_error=1")
+        return redirect("/rsss_app/login?login_error=1")
     auth_login(user)
     return redirect("/rsss_app/")
 
@@ -104,6 +130,8 @@ def test_email_route():
     from flask import session as s, jsonify
     if not s.get("user"):
         return jsonify({"error": "not authenticated"}), 401
+    if s["user"].get("role") != "ministry" or s["user"].get("readonly"):
+        return jsonify({"error": "ministry administrators only"}), 403
     try:
         from core.email_sender import EmailSender
         from config.app_config import TEST_EMAIL
@@ -126,14 +154,40 @@ def test_email_route():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+# ── Callback gatekeeper (fail closed) ──────────────────────────────────────────
+# Dash callbacks are plain POSTs to /_dash-update-component — reachable by
+# anyone, whatever the page shows. A visitor who is NOT signed in may only
+# trigger the public pages' callbacks (routing, main dashboard, at-risk
+# dashboard), and never the download ones. Everything else — follow-up
+# search/save, eBuzima, reports, settings, sync, any page added later — gets 403.
+_PUBLIC_OUTPUTS = ("page-content.", "db-", "rd-", "risk-tab-content.")
+_PUBLIC_DENY    = ("db-download.", "db-dl-msg.", "rd-download.", "rd-dl-msg.")
+
+
+@server.before_request
+def _guard_callbacks():
+    if request.path != f"{URL_PREFIX}/_dash-update-component" or session.get("user"):
+        return None
+    from config.app_config import PUBLIC_VIEW
+    out = str((request.get_json(silent=True) or {}).get("output", ""))
+    ids = [i for i in out.replace("...", "\n").replace("..", "").split("\n") if i]
+    allowed = PUBLIC_VIEW and ids and all(
+        i.startswith(_PUBLIC_OUTPUTS) and not i.startswith(_PUBLIC_DENY) for i in ids)
+    if not allowed:
+        return ("Sign in required", 403)
+    return None
+
+
 # ── Routing callback ───────────────────────────────────────────────────────────
 
+_PUBLIC_PATHS = ("/", "/dashboard", "/risk")
+
+
 @app.callback(Output("page-content", "children"),
-              Input("url", "pathname"))
-def route(pathname: str):
-    from flask import session as s
-    from auth import has_min_role
-    user = s.get("user")
+              Input("url", "pathname"), State("url", "search"))
+def route(pathname: str, search: str):
+    from auth import has_min_role, current_user, is_public
+    user = current_user()
     if not user:
         return html.Div()
 
@@ -142,6 +196,13 @@ def route(pathname: str):
     p = p[len(URL_PREFIX):]   # e.g. "/rsss_app/reports" → "/reports"
     path = p or "/"
     readonly = bool(user.get("readonly"))
+
+    if path == "/login":
+        from components.layout import login_layout
+        err = "Invalid username or password." if "login_error" in (search or "") else ""
+        return login_layout(err, embedded=True)
+    if is_public(user) and path not in _PUBLIC_PATHS:
+        return _signin_prompt()
 
     if path in ("/", "/dashboard"):
         from pages.dashboard import layout
@@ -170,7 +231,29 @@ def route(pathname: str):
         from pages.ebuzima import layout
         return layout(user)
 
+    if path == "/profile":
+        if readonly:
+            return _forbidden("View-only links don't have a profile.")
+        from pages.profile import layout
+        return layout(user)
+
+    if path == "/settings":
+        if user.get("role") != "ministry" or readonly:
+            return _forbidden("Settings are available to ministry administrators only.")
+        from pages.settings import layout
+        return layout(user)
+
     return _not_found(path)
+
+
+def _signin_prompt() -> html.Div:
+    return dbc.Container(dbc.Card(dbc.CardBody([
+        html.Div([html.I(className="bi bi-lock"), "Sign in to see this page"],
+                 className="nhic-card-title"),
+        html.P("This part of RSSS is for health staff. The public view shows the national "
+               "dashboard and at-risk dashboard.", className="nhic-hint mt-2"),
+        dcc.Link("Sign in", href=f"{URL_PREFIX}/login", className="btn btn-nhic btn-sm"),
+    ]), className="nhic-card mt-4", style={"maxWidth": "520px"}), className="py-4")
 
 
 def _forbidden(msg: str = "") -> html.Div:
@@ -194,12 +277,18 @@ from pages.reports   import register_callbacks as _reg_reports
 from pages.followup  import register_callbacks as _reg_followup
 from pages.risk      import register_callbacks as _reg_risk
 from pages.ebuzima   import register_callbacks as _reg_ebuzima
+from pages.settings  import register_callbacks as _reg_settings
+from pages.profile   import register_callbacks as _reg_profile
+from pages.risk_dashboard import register_callbacks as _reg_risk_dash
 
 _reg_dashboard(app)
 _reg_reports(app)
 _reg_followup(app)
 _reg_risk(app)
 _reg_ebuzima(app)
+_reg_settings(app)
+_reg_profile(app)
+_reg_risk_dash(app)
 
 
 # ── Automatic background sync ──────────────────────────────────────────────────
@@ -272,9 +361,24 @@ def _start_auto_report() -> None:
 
 # Only start the scheduler in the actual serving process (avoid the Flask
 # debug reloader's parent process starting a duplicate).
+def _preload_data() -> None:
+    """Load the dashboard data at startup (from the disk cache, ~10s) so the
+    first visitor after a restart doesn't wait for it."""
+    import threading
+
+    def _work():
+        try:
+            import data
+            data.warm_child_level()
+        except Exception as exc:
+            print(f"[startup] data preload failed: {exc}")
+    threading.Thread(target=_work, daemon=True).start()
+
+
 if os.environ.get("WERKZEUG_RUN_MAIN") == "true" or not os.environ.get("DEBUG", "true").lower() == "true":
     _start_auto_sync()
     _start_auto_report()
+    _preload_data()
 
 
 # ── Dev server ─────────────────────────────────────────────────────────────────

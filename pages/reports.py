@@ -43,40 +43,18 @@ def layout(user: dict) -> html.Div:
                     className="text-end"),
         ], className="align-items-center mb-3"),
 
-        # ── Automatic monthly sending schedule ────────────────────────────────
-        dbc.Card(dbc.CardBody([
-            html.Div([html.I(className="bi bi-calendar-check me-2"),
-                      html.Span("Automatic monthly sending",
-                                className="fw-semibold", style={"color": "#2C3E50"})],
-                     className="mb-2"),
-            dbc.Row([
-                dbc.Col([dbc.Label("Enable", style=_LBL),
-                         dbc.Switch(id="sched-enabled", value=bool(sched["enabled"]),
-                                    className="mt-1")], xs=6, md=2),
-                dbc.Col([dbc.Label("Send on day", style=_LBL),
-                         dcc.Dropdown(id="sched-day",
-                                      options=[{"label": f"Day {d}", "value": d}
-                                               for d in range(1, 29)],
-                                      value=int(sched["day"]), clearable=False,
-                                      style=_DD)], xs=6, md=3),
-                dbc.Col([dbc.Label("Level", style=_LBL),
-                         dbc.RadioItems(id="sched-level",
-                                        options=[{"label": " Hospital", "value": "hospital"},
-                                                 {"label": " Facility", "value": "facility"}],
-                                        value=sched["level"], inline=True,
-                                        className="mt-1")], xs=8, md=3),
-                dbc.Col([dbc.Label("Test only", style=_LBL),
-                         dbc.Switch(id="sched-dry", value=bool(sched["dry_run"]),
-                                    className="mt-1")], xs=4, md=2),
-                dbc.Col([dbc.Label(" ", style=_LBL),
-                         dbc.Button([html.I(className="bi bi-save me-1"), "Save"],
-                                    id="sched-save", color="danger", size="sm",
-                                    className="d-block mt-1")], xs=12, md=2),
-            ], className="g-2 align-items-end"),
-            html.Div(id="sched-status", className="text-muted mt-2",
-                     style={"fontSize": "0.78rem"}),
-        ], className="py-2"),
-            className="mb-3 border-0 shadow-sm", style={"borderRadius": "8px"}),
+        # ── Automatic monthly sending — summary only; edited in Settings ─────
+        # (ministry admins only — it controls emails to every hospital)
+        dbc.Alert([
+            html.I(className="bi bi-calendar-check me-2"),
+            (f"Automatic sending is on: {sched['level']} reports for the previous month "
+             f"go out on day {sched['day']} of each month"
+             + (" to the test inbox only." if sched["dry_run"] else " to real contacts.")
+             if sched["enabled"] else "Automatic monthly sending is off."),
+            *([" ", dcc.Link("Change in Settings", href="/rsss_app/settings")]
+              if role == "ministry" and not user.get("readonly") else []),
+        ], color="light", className="py-2 mb-3 border-0 shadow-sm",
+           style={"fontSize": "0.82rem"}),
 
         dbc.Card(dbc.CardBody([
             dbc.Row([
@@ -123,7 +101,7 @@ def layout(user: dict) -> html.Div:
                         options=[{"label": " Dry-run (redirect all to test address)", "value": "dry"}],
                         value=["dry"], inline=True), width="auto"),
                     dbc.Col(dbc.Checklist(
-                        id="rpt-send-overview",
+                        id="rpt-send-overview", style={} if role == "ministry" else {"display": "none"},
                         options=[{"label": " Also send National Overview PDF to senior officials",
                                   "value": "overview"}],
                         value=[], inline=True), width="auto"),
@@ -175,28 +153,6 @@ def register_callbacks(app) -> None:
             return [o["value"] for o in (options or [])]
         return []
 
-    # ── Save auto-send schedule ────────────────────────────────────────────────
-    @app.callback(
-        Output("sched-status", "children"),
-        Input("sched-save",    "n_clicks"),
-        State("sched-enabled", "value"),
-        State("sched-day",     "value"),
-        State("sched-level",   "value"),
-        State("sched-dry",     "value"),
-        prevent_initial_call=True,
-    )
-    def _save_schedule(n, enabled, day, level, dry):
-        import jobs
-        jobs.save_report_schedule({
-            "enabled": bool(enabled), "day": int(day or 1),
-            "level": level or "hospital", "dry_run": bool(dry),
-        })
-        if enabled:
-            mode = "test emails to the test inbox" if dry else "emails to real contacts"
-            return (f"✅ Saved. {level.title()} reports will be sent automatically on "
-                    f"day {day} each month ({mode}).")
-        return "✅ Saved. Automatic sending is disabled."
-
     @app.callback(
         Output("rpt-job-id",        "data"),
         Output("rpt-poll",          "disabled"),
@@ -215,11 +171,30 @@ def register_callbacks(app) -> None:
     def _start(n, rtype, targets, month, year, email_chk, dry_chk, overview_chk):
         from flask import session
         import jobs
+        from auth import has_min_role
+        from data import get_df, filter_by_user
         user = session.get("user")
         if not user:
             return no_update, True, _alert("Not authenticated.", "danger"), False
+        if user.get("readonly") or not has_min_role(user, "hospital"):
+            return no_update, True, _alert("Reports are available to hospital level and above.",
+                                           "danger"), False
         if not targets:
             return no_update, True, _alert("Select at least one target.", "warning"), False
+        # The target list comes from the browser — keep only hospitals/facilities
+        # inside this user's own area (same source as the dropdown).
+        df  = filter_by_user(get_df(), user)
+        col = "district_hospital" if rtype == "hospital" else "health_facility"
+        allowed = set(df[col].dropna()) if df is not None and col in df.columns else set()
+        outside = [t for t in targets if t not in allowed]
+        targets = [t for t in targets if t in allowed]
+        if outside:
+            return no_update, True, _alert(f"Outside your area: {', '.join(outside[:5])}", "danger"), False
+        # Emailing follows the page's rule; the national overview is ministry-only.
+        if email_chk and user.get("role") not in ("ministry", "district", "hospital"):
+            email_chk = []
+        if overview_chk and user.get("role") != "ministry":
+            overview_chk = []
         who = user.get("username", "unknown")
         if rtype == "hospital":
             jid = jobs.start_hospital_job(targets, month, year, bool(email_chk),

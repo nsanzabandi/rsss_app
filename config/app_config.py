@@ -11,6 +11,12 @@ APP_BASE_URL = os.environ.get("APP_BASE_URL", "http://localhost:8050").rstrip("/
 # the link is ready to share.
 INCLUDE_DASHBOARD_LINK_IN_EMAILS = False
 
+# Public (no login) view: national dashboard + at-risk dashboard, aggregates
+# only — no child lists, downloads or operational pages. Signing in unlocks
+# everything the user's role allows. Set PUBLIC_VIEW=false in .env to require
+# login for everything.
+PUBLIC_VIEW = os.environ.get("PUBLIC_VIEW", "true").strip().lower() == "true"
+
 # ── Email ──────────────────────────────────────────────────────────────────────
 # All emails in dry-run mode are redirected here instead of real recipients.
 TEST_EMAIL = "nsanzabandidani@gmail.com"   # dry-run redirect target

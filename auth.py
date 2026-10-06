@@ -63,6 +63,26 @@ def get_current_user() -> dict | None:
     return session.get("user")
 
 
+# Visitor who hasn't signed in, when the public view is on: national scope,
+# read-only. Never stored in the session; pages that list children or allow
+# actions must check is_public() / readonly.
+PUBLIC_USER = {"username": "public", "full_name": "Public view", "role": "public",
+               "readonly": True, "public": True, "email": ""}
+
+
+def current_user() -> dict | None:
+    """The signed-in user, else the public visitor (if the public view is on)."""
+    u = session.get("user")
+    if u:
+        return u
+    from config.app_config import PUBLIC_VIEW
+    return dict(PUBLIC_USER) if PUBLIC_VIEW else None
+
+
+def is_public(user: dict | None) -> bool:
+    return bool(user and user.get("public"))
+
+
 # ── View-only tokenised links (scoped dashboards, no account needed) ───────────
 
 def _view_serializer():
@@ -139,6 +159,7 @@ def is_hospital_plus(user: dict | None) -> bool:
 # ── Display helpers ────────────────────────────────────────────────────────────
 
 _ROLE_LABELS = {
+    "public":        "Public view",
     "ministry":      "Ministry",
     "district":      "District Officer",
     "hospital":      "Hospital",
