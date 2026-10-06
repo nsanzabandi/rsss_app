@@ -1,0 +1,303 @@
+/* ─────────────────────────────────────────────────────────────────────────────
+   NHIC · RSSS — app shell (sidebar, login, settings).
+   Dash serves and auto-loads every .css in assets/. Brand colours live in the
+   variables below — once assets/moh_logo.png is in place, tune them here only.
+   ───────────────────────────────────────────────────────────────────────────── */
+
+:root {
+  --nhic-navy:        #0B2C4A;   /* sidebar / brand panel */
+  --nhic-navy-hover:  #133A5F;
+  --nhic-blue:        #0078C0;   /* MoH logo blue */
+  --nhic-blue-light:  #3FA9E8;   /* same hue, readable on the navy sidebar */
+  --nhic-yellow:      #FAD201;   /* Rwanda flag yellow */
+  --nhic-green:       #18A850;   /* MoH logo green */
+  --on-dark:          #D5E0EA;
+  --on-dark-muted:    #8299AF;
+  --on-dark-line:     rgba(255, 255, 255, .09);
+  --page-bg:          #F3F5F8;
+  --ink:              #1F2D3D;
+  --ink-muted:        #5D6D7E;
+  --ok:               #2E9E5B;
+  --warn:             #E0A100;
+  --bad:              #D64541;
+  --sidebar-w:        244px;
+}
+
+body { font-family: 'Inter', system-ui, -apple-system, sans-serif; color: var(--ink);
+       background: var(--page-bg); }
+
+/* ── Sidebar ──────────────────────────────────────────────────────────────── */
+.nhic-sidebar {
+  position: fixed; inset: 0 auto 0 0; width: var(--sidebar-w); z-index: 100;
+  display: flex; flex-direction: column; overflow-y: auto;
+  background: var(--nhic-navy); box-shadow: 2px 0 10px rgba(0, 0, 0, .18);
+}
+/* National tri-colour hairline across the very top */
+.nhic-flag { height: 4px; flex: none;
+  /* the national flag's own colours (not the MoH logo palette) */
+  background: linear-gradient(90deg, #00A1DE 0 50%, #FAD201 50% 75%, #20603D 75% 100%); }
+
+.nhic-brand { display: flex; align-items: center; gap: 11px; padding: 18px 16px 14px; }
+.nhic-brand img { height: 44px; width: auto; background: #fff; border-radius: 8px; padding: 3px; }
+.nhic-badge {
+  height: 44px; min-width: 44px; display: grid; place-items: center; border-radius: 8px;
+  background: #fff; color: var(--nhic-navy); font-weight: 800; font-size: .72rem;
+  letter-spacing: .03em; line-height: 1.05; text-align: center;
+}
+.nhic-org      { color: #fff; font-weight: 800; font-size: 1.02rem; letter-spacing: .06em; line-height: 1.1; }
+.nhic-org-full { color: var(--on-dark-muted); font-size: .62rem; line-height: 1.25; margin-top: 2px; }
+
+.nhic-product {
+  margin: 0 12px 6px; padding: 10px 12px; border-radius: 8px;
+  background: rgba(255, 255, 255, .05); border: 1px solid var(--on-dark-line);
+}
+.nhic-product-name { color: #fff; font-weight: 700; font-size: .9rem; letter-spacing: .04em; }
+.nhic-product-desc { color: var(--on-dark-muted); font-size: .66rem; margin-top: 1px; }
+
+.nhic-nav { flex: 1; padding: 4px 10px 10px; }
+.nhic-section {
+  color: var(--on-dark-muted); font-size: .62rem; font-weight: 700; text-transform: uppercase;
+  letter-spacing: .1em; padding: 14px 10px 5px;
+}
+.nhic-sidebar .nav-link.nhic-link {
+  display: flex; align-items: center; gap: 10px; color: var(--on-dark);
+  font-size: .86rem; font-weight: 500; padding: 8px 10px; margin-bottom: 1px;
+  border-radius: 7px; border-left: 3px solid transparent; transition: background .12s;
+}
+.nhic-sidebar .nav-link.nhic-link i { font-size: 1rem; width: 18px; text-align: center; opacity: .85; }
+.nhic-sidebar .nav-link.nhic-link:hover { background: var(--nhic-navy-hover); color: #fff; }
+.nhic-sidebar .nav-link.nhic-link.active {
+  background: rgba(63, 169, 232, .16); color: #fff; font-weight: 600;
+  border-left-color: var(--nhic-blue-light);
+}
+.nhic-sidebar .nav-link.nhic-link.active i { opacity: 1; color: var(--nhic-blue-light); }
+
+.nhic-foot { padding: 10px 14px 16px; border-top: 1px solid var(--on-dark-line); }
+.nhic-fresh {
+  display: flex; align-items: center; gap: 8px; color: var(--on-dark); font-size: .72rem;
+  padding: 7px 9px; border-radius: 7px; background: rgba(255, 255, 255, .05); margin-bottom: 10px;
+}
+.nhic-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.nhic-dot.ok   { background: var(--ok);   box-shadow: 0 0 0 3px rgba(46, 158, 91, .2); }
+.nhic-dot.warn { background: var(--warn); box-shadow: 0 0 0 3px rgba(224, 161, 0, .2); }
+.nhic-dot.bad  { background: var(--bad);  box-shadow: 0 0 0 3px rgba(214, 69, 65, .2); }
+.nhic-fresh small { display: block; color: var(--on-dark-muted); font-size: .64rem; }
+
+.nhic-user { display: flex; align-items: center; gap: 10px; }
+.nhic-avatar {
+  width: 32px; height: 32px; border-radius: 50%; flex: none; display: grid; place-items: center;
+  background: var(--nhic-blue); color: #fff; font-weight: 700; font-size: .75rem;
+}
+.nhic-user-name { color: #fff; font-size: .78rem; font-weight: 600; line-height: 1.2;
+                  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 150px; }
+.nhic-user-role { color: var(--on-dark-muted); font-size: .66rem; }
+.nhic-signout { display: inline-flex; align-items: center; gap: 6px; margin-top: 10px;
+                color: var(--on-dark-muted); font-size: .74rem; text-decoration: none; }
+.nhic-signout:hover { color: #fff; }
+.nhic-partner { color: var(--on-dark-muted); font-size: .6rem; margin-top: 12px; opacity: .8; }
+
+.nhic-main { margin-left: var(--sidebar-w); padding: 24px; min-height: 100vh;
+             background: var(--page-bg); width: calc(100% - var(--sidebar-w)); min-width: 0; }
+
+/* Narrow screens: sidebar becomes a top bar, content full width */
+@media (max-width: 860px) {
+  .nhic-sidebar { position: static; width: 100%; max-height: none; }
+  .nhic-main    { margin-left: 0; width: 100%; padding: 16px; }
+  .nhic-shell   { flex-direction: column; }
+}
+
+/* ── Login ────────────────────────────────────────────────────────────────── */
+.nhic-login-bg { min-height: 100vh; display: grid; place-items: center; padding: 24px 16px;
+                 background: radial-gradient(1200px 600px at 10% 0%, #E6F1F8 0%, var(--page-bg) 60%); }
+.nhic-login {
+  width: 100%; max-width: 820px; display: grid; grid-template-columns: 1fr 1fr;
+  background: #fff; border-radius: 14px; overflow: hidden; box-shadow: 0 10px 40px rgba(11, 44, 74, .14);
+}
+.nhic-login-brand { background: var(--nhic-navy); color: #fff; padding: 36px 32px;
+                    display: flex; flex-direction: column; position: relative; }
+.nhic-login-brand .nhic-flag { position: absolute; inset: 0 0 auto 0; }
+.nhic-login-brand .nhic-brand { padding: 0; margin-top: 8px; }
+.nhic-login-title { font-size: 1.5rem; font-weight: 800; letter-spacing: .03em; margin: 34px 0 6px; }
+.nhic-login-sub   { color: var(--on-dark); font-size: .86rem; line-height: 1.5; }
+.nhic-login-foot  { margin-top: auto; padding-top: 28px; color: var(--on-dark-muted); font-size: .7rem; }
+.nhic-login-form  { padding: 36px 32px; }
+.nhic-login-form h5 { font-weight: 700; color: var(--ink); margin-bottom: 4px; }
+.nhic-login-form .form-control { font-size: .9rem; border-radius: 7px; padding: 9px 12px; }
+.nhic-login-form label { font-size: .8rem; font-weight: 600; color: var(--ink-muted); }
+.btn-nhic { background: var(--nhic-navy); border-color: var(--nhic-navy); color: #fff; font-weight: 600; }
+.btn-nhic:hover, .btn-nhic:focus { background: var(--nhic-navy-hover); border-color: var(--nhic-navy-hover); color: #fff; }
+@media (max-width: 700px) { .nhic-login { grid-template-columns: 1fr; }
+                            .nhic-login-title { margin-top: 22px; } }
+
+/* ── Settings ─────────────────────────────────────────────────────────────── */
+.nhic-page-title { font-weight: 700; color: var(--ink); margin: 0; }
+.nhic-page-sub   { color: var(--ink-muted); font-size: .8rem; }
+.nhic-card { background: #fff; border: 0; border-radius: 10px; box-shadow: 0 1px 4px rgba(16, 38, 64, .08); }
+.nhic-card-title { font-weight: 700; font-size: .9rem; color: var(--ink); display: flex; align-items: center; gap: 8px; }
+.nhic-card-title i { color: var(--nhic-blue); }
+.nhic-hint { color: var(--ink-muted); font-size: .76rem; }
+.nhic-tabs .nav-link { font-size: .84rem; font-weight: 500; color: var(--ink-muted); border: 0;
+                       border-bottom: 2px solid transparent; padding: 8px 14px; }
+.nhic-tabs .nav-link.active { color: var(--nhic-navy); border-bottom-color: var(--nhic-blue);
+                              background: transparent; font-weight: 600; }
+.nhic-kv { display: grid; grid-template-columns: max-content 1fr; gap: 6px 18px; font-size: .82rem; }
+.nhic-kv dt { color: var(--ink-muted); font-weight: 500; }
+.nhic-kv dd { margin: 0; color: var(--ink); }
+.nhic-status-ok   { color: var(--ok);  font-weight: 600; }
+.nhic-status-warn { color: #B07F00;    font-weight: 600; }
+.nhic-status-bad  { color: var(--bad); font-weight: 600; }
+.nhic-table-wrap { overflow-x: auto; }
+
+/* Tables + dropdowns inside cards match the page's text size */
+.nhic-card .table { font-size: .82rem; margin-bottom: 0; }
+.nhic-card .table th { font-weight: 600; color: var(--ink-muted); font-size: .76rem;
+                       text-transform: uppercase; letter-spacing: .03em; }
+.nhic-card .table td, .nhic-card .table th { padding: 6px 8px; }
+.nhic-card .dash-dropdown, .nhic-card .dash-dropdown * { font-size: .84rem; }
+
+/* Phone: compact top bar — brand + horizontal nav; extras hidden */
+@media (max-width: 860px) {
+  .nhic-product, .nhic-section, .nhic-fresh, .nhic-partner { display: none; }
+  .nhic-brand { padding: 12px 14px 8px; }
+  .nhic-nav.flex-column { flex-direction: row !important; flex-wrap: wrap; gap: 4px; padding: 0 10px 10px; }
+  .nhic-sidebar .nav-link.nhic-link { padding: 6px 10px; border-left: 0; font-size: .8rem; }
+  .nhic-foot { display: flex; align-items: center; justify-content: space-between; padding: 8px 14px; }
+  .nhic-signout { margin-top: 0; }
+}
+
+/* ── Top bar (MoH identity + user menu) ───────────────────────────────────── */
+.nhic-main { padding: 0; }
+.nhic-content { padding: 20px 24px 24px; }
+.nhic-topbar {
+  position: sticky; top: env(safe-area-inset-top, 0px); z-index: 90;
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 8px 24px; background: #fff; border-bottom: 1px solid #E3E8EE;
+  box-shadow: 0 1px 3px rgba(16, 38, 64, .04);
+}
+.nhic-top-id { display: flex; align-items: center; gap: 12px; }
+.nhic-top-id img { height: 44px; width: auto; }
+.nhic-top-id .nhic-badge { background: var(--nhic-navy); color: #fff; height: 40px; min-width: 40px; }
+.nhic-top-country  { font-size: .66rem; color: var(--ink-muted); text-transform: uppercase; letter-spacing: .08em; }
+.nhic-top-ministry { font-size: .98rem; font-weight: 700; color: var(--nhic-navy); line-height: 1.15; }
+.nhic-usermenu .dropdown-toggle { color: var(--ink); text-decoration: none; padding: 4px 6px; border-radius: 8px; }
+.nhic-usermenu .dropdown-toggle:hover, .nhic-usermenu .dropdown-toggle:focus { background: #F3F5F8; box-shadow: none; }
+.nhic-top-who  { display: flex; flex-direction: column; text-align: left; line-height: 1.15; }
+.nhic-top-name { font-size: .82rem; font-weight: 600; max-width: 180px; overflow: hidden;
+                 text-overflow: ellipsis; white-space: nowrap; }
+.nhic-top-role { font-size: .68rem; color: var(--ink-muted); }
+.nhic-usermenu .dropdown-menu { font-size: .84rem; min-width: 220px; border: 0;
+                                box-shadow: 0 8px 24px rgba(16, 38, 64, .14); border-radius: 10px; }
+.nhic-badge-dark { background: #fff; color: var(--nhic-navy); }
+@media (max-width: 860px) {
+  .nhic-topbar  { padding: 8px 14px; position: static; }
+  .nhic-top-who { display: none; }
+  .nhic-content { padding: 14px; }
+}
+.nhic-usermenu .dropdown-toggle { display: flex; align-items: center; gap: 6px; }
+.nhic-usermenu .dropdown-toggle::after { margin-left: 2px; }
+
+/* MoH logo placements */
+.nhic-top-id img { height: 46px; width: auto; }
+.nhic-login-logo { text-align: center; margin: -8px 0 18px; }
+.nhic-login-logo img { height: 132px; width: auto; }
+
+/* Slim top bar (government-site style strip): ~44px tall, one line */
+.nhic-topbar { padding: 5px 24px; min-height: 44px; }
+.nhic-top-id { gap: 10px; }
+.nhic-top-id img { height: 32px; width: auto; }
+.nhic-top-country, .nhic-top-ministry { font-size: .8rem; line-height: 1; letter-spacing: 0;
+                                        text-transform: none; }
+.nhic-top-country  { color: var(--ink-muted); font-weight: 500; }
+.nhic-top-ministry { color: var(--nhic-blue); font-weight: 700; }
+.nhic-top-sep { width: 1px; height: 18px; background: #D5DCE4; }
+.nhic-topbar .nhic-avatar { width: 26px; height: 26px; font-size: .66rem; }
+.nhic-topbar .nhic-top-name { font-size: .8rem; }
+.nhic-usermenu .dropdown-toggle { padding: 3px 6px; }
+@media (max-width: 860px) {
+  .nhic-top-country, .nhic-top-sep { display: none; }
+  .nhic-topbar .nhic-top-name { display: none; }
+}
+
+/* Top bar: identity | centred title | user menu */
+.nhic-topbar { display: grid; grid-template-columns: 1fr auto 1fr; }
+.nhic-usermenu { justify-self: end; }
+.nhic-top-title { font-size: .92rem; font-weight: 700; color: var(--nhic-navy);
+                  text-align: center; white-space: nowrap; }
+@media (max-width: 1180px) { .nhic-top-title { font-size: .8rem; white-space: normal; max-width: 280px; } }
+@media (max-width: 860px)  { .nhic-topbar { grid-template-columns: auto 1fr auto; }
+                             .nhic-top-title { font-size: .74rem; } }
+.nhic-dl-menu .dropdown-toggle { font-size: .8rem; font-weight: 600; border: 1px solid #DDE3EA; background: #fff; }
+.nhic-dl-menu .dropdown-menu { font-size: .84rem; border: 0; border-radius: 10px;
+                               box-shadow: 0 8px 24px rgba(16, 38, 64, .14); }
+
+/* ── Taller top bar, blue title ───────────────────────────────────────────── */
+.nhic-topbar { min-height: 58px; padding: 8px 24px; }
+.nhic-top-id img { height: 40px; }
+.nhic-top-country, .nhic-top-ministry { font-size: .86rem; }
+.nhic-top-title { font-size: 1.05rem; font-weight: 700; color: var(--nhic-blue); letter-spacing: .01em; }
+.nhic-topbar .nhic-avatar { width: 30px; height: 30px; font-size: .7rem; }
+.nhic-topbar .nhic-top-name { font-size: .84rem; }
+
+/* ── Collapsible sidebar: icon rail by default, expands on hover/focus ─────
+   Expands OVER the content (fixed position), so the page never reflows.
+   Hidden parts fade but keep their height, so icons don't jump. */
+:root { --rail-w: 68px; }
+@media (min-width: 861px) {
+  .nhic-sidebar { width: var(--rail-w); overflow-x: hidden;
+                  transition: width .18s ease, box-shadow .18s ease; }
+  .nhic-sidebar:hover, .nhic-sidebar:focus-within {
+    width: var(--sidebar-w); box-shadow: 6px 0 24px rgba(11, 44, 74, .28); }
+  .nhic-main { margin-left: var(--rail-w); width: calc(100% - var(--rail-w)); }
+
+  .nhic-sidebar .nhic-brand > div:last-child, .nhic-sidebar .nhic-product,
+  .nhic-sidebar .nhic-section, .nhic-sidebar .nhic-label,
+  .nhic-sidebar .nhic-fresh > div, .nhic-sidebar .nhic-partner {
+    opacity: 0; transition: opacity .12s ease; white-space: nowrap; }
+  .nhic-sidebar:hover .nhic-brand > div:last-child, .nhic-sidebar:hover .nhic-product,
+  .nhic-sidebar:hover .nhic-section, .nhic-sidebar:hover .nhic-label,
+  .nhic-sidebar:hover .nhic-fresh > div, .nhic-sidebar:hover .nhic-partner,
+  .nhic-sidebar:focus-within .nhic-brand > div:last-child, .nhic-sidebar:focus-within .nhic-product,
+  .nhic-sidebar:focus-within .nhic-section, .nhic-sidebar:focus-within .nhic-label,
+  .nhic-sidebar:focus-within .nhic-fresh > div, .nhic-sidebar:focus-within .nhic-partner {
+    opacity: 1; transition-delay: .06s; }
+
+  /* keep the rail's own pieces inside 68px */
+  .nhic-sidebar .nhic-brand { padding-left: 12px; }
+  .nhic-sidebar .nhic-badge { flex: none; }
+  .nhic-sidebar .nhic-nav { padding-left: 8px; padding-right: 8px; }
+  .nhic-sidebar .nav-link.nhic-link { white-space: nowrap; }
+  .nhic-sidebar .nhic-fresh { padding-left: 14px; white-space: nowrap; }
+}
+
+/* ── Sidebar pushes the page instead of covering it; content centred ─────── */
+@media (min-width: 861px) {
+  /* hover intent: open after a short pause (so crossing the rail doesn't jolt
+     the page), close straight away when the pointer leaves */
+  .nhic-sidebar { transition: width .2s ease 0s, box-shadow .2s ease 0s; }
+  .nhic-sidebar:hover, .nhic-sidebar:focus-within {
+    box-shadow: 2px 0 12px rgba(11, 44, 74, .18); transition-delay: .15s; }
+  .nhic-main { transition: margin-left .2s ease 0s, width .2s ease 0s; }
+  .nhic-sidebar:hover ~ .nhic-main, .nhic-sidebar:focus-within ~ .nhic-main {
+    margin-left: var(--sidebar-w); width: calc(100% - var(--sidebar-w)); transition-delay: .15s; }
+}
+/* page content centred on wide screens */
+#page-content.nhic-content { max-width: 1400px; margin-left: auto; margin-right: auto; width: 100%; }
+
+/* Clickable KPI card */
+.nhic-card-link { transition: transform .12s ease, box-shadow .12s ease; cursor: pointer;
+                  border-left: 3px solid #B03A2E !important; }
+a:hover > .nhic-card-link, a:focus-visible > .nhic-card-link {
+  transform: translateY(-2px); box-shadow: 0 6px 18px rgba(176, 58, 46, .18) !important; }
+
+/* Public view */
+.nhic-signin { font-size: .82rem; padding: 5px 14px; }
+.nhic-login-embedded { min-height: calc(100vh - 140px); background: transparent; }
+
+/* KPI change vs previous period: rise = red flag, fall = green flag */
+.nhic-delta { display: inline-block; font-size: .72rem; font-weight: 700; padding: 1px 7px;
+              border-radius: 999px; margin-right: 6px; white-space: nowrap; }
+.nhic-delta-up   { background: #FDECEA; color: #B42318; }
+.nhic-delta-down { background: #E7F6EC; color: #1E7B45; }
+.nhic-delta-flat { background: #EEF1F5; color: #5D6D7E; }
+.nhic-delta-vs   { font-size: .68rem; color: #8A99A8; white-space: nowrap; }
+.nhic-delta-vs { display: block; margin-top: 2px; }

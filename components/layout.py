@@ -1,209 +1,223 @@
 """
-components/layout.py — Sidebar shell + login form.
+components/layout.py — NHIC app shell (sidebar) + login form.
 
 serve_layout() is assigned to app.layout (as a function, not a value)
 so it is called fresh on every page load, reading flask.session each time.
+Styling lives in assets/nhic.css (auto-loaded by Dash).
 """
+from datetime import datetime
 from pathlib import Path
 
-from dash import html, dcc
+from dash import html, dcc, get_asset_url
 import dash_bootstrap_components as dbc
 
 _ASSETS_DIR = Path(__file__).resolve().parent.parent / "assets"
+_BASE       = "/rsss_app"
 
-SIDEBAR_BG    = "#3B4148"   # neutral gray sidebar
-SIDEBAR_TEXT  = "#CBD3DC"
-SIDEBAR_LINE  = "#525A63"   # divider colour on the gray sidebar
-PRIMARY       = "#C0392B"
-SIDEBAR_W     = "220px"
-
-
-def _nav_link(label: str, href: str, icon: str) -> dbc.NavLink:
-    return dbc.NavLink(
-        [html.I(className=f"bi {icon} me-2"), label],
-        href=href,
-        active="exact",
-        style={
-            "color": SIDEBAR_TEXT,
-            "borderRadius": "6px",
-            "padding": "8px 12px",
-            "marginBottom": "2px",
-            "fontSize": "0.87rem",
-            "fontWeight": "500",
-        },
-        className="sidebar-link",
-    )
+ORG_SHORT   = "NHIC"
+ORG_FULL    = "National Health Intelligence Center"
+PRODUCT     = "RSSS"
+PRODUCT_FULL = "Rwanda Stunting Surveillance System"
+APP_TITLE   = "Stunting Surveillance Dashboard For Immunized Children"
 
 
-def _rbc_logo() -> html.Div:
-    """RBC logo mark. Uses the official image if you save it to
-    assets/rbc_logo.png; otherwise shows a clean built-in badge."""
-    if (_ASSETS_DIR / "rbc_logo.png").exists():
-        return html.Img(src="/assets/rbc_logo.png",
-                        style={"height": "42px", "background": "#fff",
-                               "borderRadius": "6px", "padding": "3px"})
-    return html.Div("RBC", style={
-        "background": "#FFFFFF", "color": PRIMARY, "fontWeight": "800",
-        "fontSize": "0.95rem", "borderRadius": "8px", "padding": "8px 9px",
-        "letterSpacing": "0.02em", "lineHeight": "1",
-        "boxShadow": "0 1px 3px rgba(0,0,0,.25)"})
+def _logo(full: bool = False) -> html.Img | html.Div:
+    """Ministry of Health logo from assets/.
+    full=False → emblem only (moh_emblem.png), for small spaces next to our
+    own "Republic of Rwanda · Ministry of Health" text; full=True → the full
+    logo with its built-in wording (moh_logo.png), for large display."""
+    names = ("moh_logo.svg", "moh_logo.png") if full else ("moh_emblem.png", "moh_logo.png")
+    for name in names:
+        if (_ASSETS_DIR / name).exists():
+            return html.Img(src=get_asset_url(name), alt="Ministry of Health, Republic of Rwanda")
+    return html.Div(["MoH"], className="nhic-badge", title="Ministry of Health, Rwanda")
+
+
+def _brand(with_logo: bool = True) -> html.Div:
+    """NHIC name block. The sidebar uses the NHIC mark (the MoH logo sits in
+    the top bar); the login page shows the MoH logo here."""
+    return html.Div([
+        _logo() if with_logo else html.Div("NHIC", className="nhic-badge nhic-badge-dark"),
+        html.Div([
+            html.Div(ORG_SHORT, className="nhic-org"),
+            html.Div(ORG_FULL, className="nhic-org-full"),
+        ]),
+    ], className="nhic-brand")
+
+
+def _nav_link(label: str, path: str, icon: str) -> dbc.NavLink:
+    # title= gives the full name as a tooltip while the sidebar is collapsed
+    return dbc.NavLink([html.I(className=f"bi {icon}", title=label),
+                        html.Span(label, className="nhic-label")],
+                       href=f"{_BASE}{path}", active="exact", className="nhic-link")
+
+
+def _section(title: str, links: list) -> list:
+    return [html.Div(title, className="nhic-section"), *links] if links else []
+
+
+def _freshness() -> html.Div:
+    """'Data synced …' pill: when eTracker data last reached the dashboard
+    (the computed cache's data_as_of watermark). Cheap — one small JSON read."""
+    try:
+        from data import _read_meta
+        stamp = _read_meta().get("data_as_of")
+        synced = datetime.fromisoformat(stamp) if stamp else None
+    except Exception:
+        synced = None
+    if synced is None:
+        return html.Div([html.Span(className="nhic-dot bad"),
+                         html.Div(["No synced data yet", html.Small("Run an eTracker sync")])],
+                        className="nhic-fresh")
+    age_days = (datetime.now() - synced).total_seconds() / 86400
+    level = "ok" if age_days <= 2 else "warn" if age_days <= 7 else "bad"
+    return html.Div([
+        html.Span(className=f"nhic-dot {level}"),
+        html.Div([f"Data synced {synced:%d %b %Y}",
+                  html.Small(f"{synced:%H:%M} · eTracker")]),
+    ], className="nhic-fresh", title="Last time new eTracker data reached the dashboard")
+
+
+def _initials(name: str) -> str:
+    parts = [p for p in (name or "").replace(".", " ").split() if p]
+    return ("".join(p[0] for p in parts[:2]) or "?").upper()
 
 
 def _sidebar(user: dict | None = None) -> html.Div:
-    role     = (user or {}).get("role", "")
-    readonly = bool((user or {}).get("readonly"))
+    user     = user or {}
+    role     = user.get("role", "")
+    readonly = bool(user.get("readonly"))
+    is_admin = role == "ministry" and not readonly
+    public   = bool(user.get("public"))
 
-    nav_items: list = [
-        _nav_link("Dashboard", "/rsss_app/",         "bi-speedometer2"),
-    ]
-    if not readonly:   # operational page — hidden for view-only link users
-        nav_items.append(_nav_link("Reports", "/rsss_app/reports", "bi-file-earmark-pdf"))
-    nav_items += [
-        _nav_link("Follow-Up", "/rsss_app/followup", "bi-clipboard2-pulse"),
-        _nav_link("At-Risk",   "/rsss_app/risk",     "bi-exclamation-triangle-fill"),
-        _nav_link("eBuzima Nutrition", "/rsss_app/ebuzima", "bi-clipboard2-data"),
-    ]
+    analytics  = [_nav_link("Dashboard",        "/",         "bi-speedometer2"),
+                  _nav_link("At-Risk Children", "/risk",     "bi-exclamation-triangle")]
+    # Same rule as the /reports route: hospital level and above, not view-only links.
+    from auth import has_min_role
+    can_report = has_min_role(user, "hospital") and not readonly
+    operations = [_nav_link("Monthly Reports", "/reports", "bi-file-earmark-text")] if can_report else []
+    operations += [_nav_link("Follow-Up", "/followup", "bi-clipboard2-pulse")]
+    nutrition  = [_nav_link("eBuzima",          "/ebuzima",  "bi-clipboard2-data")]
+    if public:                      # public view: dashboards only
+        operations, nutrition = [], []
+    admin      = [_nav_link("Settings",         "/settings", "bi-gear")] if is_admin else []
 
-    if role == "ministry" and not readonly:
-        nav_items += [
-            html.Hr(style={"borderColor": SIDEBAR_LINE, "margin": "8px 0"}),
-            _nav_link("Settings", "/rsss_app/settings", "bi-gear"),
-        ]
+    return html.Div([
+        html.Div(className="nhic-flag"),
+        _brand(with_logo=False),
+        html.Div([html.Div(PRODUCT, className="nhic-product-name"),
+                  html.Div("Stunting Surveillance", className="nhic-product-desc")],
+                 className="nhic-product"),
+        dbc.Nav(
+            _section("Analytics", analytics) + _section("Operations", operations)
+            + _section("Nutrition", nutrition) + _section("Admin", admin),
+            vertical=True, className="nhic-nav"),
+        html.Div([
+            _freshness(),
+            html.Div("Public view — sign in for reports, follow-up and child lists.",
+                     className="nhic-partner") if public else None,
+            html.Div("Ministry of Health · in partnership with RBC", className="nhic-partner"),
+        ], className="nhic-foot"),
+    ], id="sidebar", className="nhic-sidebar")
 
-    footer_text = ""
-    if user:
-        from auth import role_label
-        footer_text = (
-            f"{user.get('full_name', user.get('username', ''))} "
-            f"· {role_label(role)}"
-        )
 
-    return html.Div(
-        [
-            html.Div([
-                html.Div([
-                    _rbc_logo(),
-                    html.Div([
-                        html.Div("RSSS", style={
-                            "color": "#FFFFFF", "fontWeight": "800",
-                            "fontSize": "1.05rem", "letterSpacing": "0.05em",
-                            "lineHeight": "1.05"}),
-                        html.Div("Rwanda Stunting Surveillance",
-                                 style={"color": SIDEBAR_TEXT, "fontSize": "0.6rem",
-                                        "letterSpacing": "0.03em"}),
-                    ]),
-                ], className="d-flex align-items-center", style={"gap": "10px"}),
-            ], style={"padding": "18px 14px 14px"}),
-
-            html.Hr(style={"borderColor": SIDEBAR_LINE, "margin": "0 0 8px"}),
-
-            dbc.Nav(nav_items, vertical=True, pills=True,
-                    style={"padding": "0 8px", "flexGrow": "1"}),
-
-            html.Div([
-                html.Hr(style={"borderColor": SIDEBAR_LINE, "margin": "0 0 8px"}),
-                html.Div(footer_text,
-                         style={"color": SIDEBAR_TEXT, "fontSize": "0.7rem",
-                                "lineHeight": "1.3", "marginBottom": "8px"}),
-                html.A(
-                    [html.I(className="bi bi-box-arrow-left me-1"), "Logout"],
-                    href="/rsss_app/logout",
-                    style={"color": "#E74C3C", "fontSize": "0.78rem",
-                           "textDecoration": "none"},
-                ),
-            ], style={"padding": "8px 14px 16px"}),
-        ],
-        id="sidebar",
-        style={
-            "width": SIDEBAR_W, "minHeight": "100vh",
-            "background": SIDEBAR_BG, "display": "flex",
-            "flexDirection": "column", "position": "fixed",
-            "top": 0, "left": 0, "zIndex": 100,
-            "boxShadow": "2px 0 8px rgba(0,0,0,.15)",
-        },
-    )
+def _topbar(user: dict) -> html.Header:
+    """Ministry of Health identity on the left; the signed-in user's menu
+    (profile, sign out) in the top-right corner."""
+    from auth import role_label
+    name     = user.get("full_name") or user.get("username", "")
+    readonly = bool(user.get("readonly"))
+    if user.get("public"):
+        right = dcc.Link([html.I(className="bi bi-box-arrow-in-right me-1"), "Sign in"],
+                         href=f"{_BASE}/login", className="btn btn-nhic btn-sm nhic-signin")
+        return html.Header([
+            html.Div([_logo(), html.Span("Republic of Rwanda", className="nhic-top-country"),
+                      html.Span(className="nhic-top-sep"),
+                      html.Span("Ministry of Health", className="nhic-top-ministry")],
+                     className="nhic-top-id"),
+            html.Div(APP_TITLE, className="nhic-top-title"),
+            html.Div(right, className="nhic-usermenu"),
+        ], className="nhic-topbar")
+    items = [dbc.DropdownMenuItem([html.Div(name, className="fw-semibold"),
+                                   html.Div(role_label(user.get("role", ""))
+                                            + (" · view only" if readonly else ""),
+                                            className="nhic-hint")], header=True)]
+    if not readonly:
+        items.append(dbc.DropdownMenuItem([html.I(className="bi bi-person me-2"), "My profile"],
+                                          href=f"{_BASE}/profile"))
+    items += [dbc.DropdownMenuItem(divider=True),
+              dbc.DropdownMenuItem([html.I(className="bi bi-box-arrow-right me-2"), "Sign out"],
+                                   href=f"{_BASE}/logout", external_link=True,
+                                   className="text-danger")]
+    return html.Header([
+        html.Div([
+            _logo(),
+            html.Span("Republic of Rwanda", className="nhic-top-country"),
+            html.Span(className="nhic-top-sep"),
+            html.Span("Ministry of Health", className="nhic-top-ministry"),
+        ], className="nhic-top-id"),
+        html.Div(APP_TITLE, className="nhic-top-title"),
+        dbc.DropdownMenu(
+            items, align_end=True, color="link", className="nhic-usermenu",
+            label=html.Span([html.Span(_initials(name), className="nhic-avatar"),
+                             html.Span(name, className="nhic-top-name")],
+                            className="d-flex align-items-center gap-2")),
+    ], className="nhic-topbar")
 
 
 def _app_shell(user: dict) -> html.Div:
     return html.Div([
         _sidebar(user),
-        html.Div(
-            html.Div(id="page-content", style={"maxWidth": "1400px"}),
-            style={
-                "marginLeft": SIDEBAR_W,
-                "padding": "24px",
-                "minHeight": "100vh",
-                "background": "#F0F2F5",
-                "flex": "1",
-                "minWidth": "0",
-                "width": f"calc(100% - {SIDEBAR_W})",
-            },
-        ),
-    ], style={"display": "flex", "width": "100%"})
+        html.Main([
+            _topbar(user),
+            html.Div(id="page-content", className="nhic-content", style={"maxWidth": "1400px"}),
+        ], className="nhic-main"),
+    ], className="nhic-shell d-flex")
 
 
-def login_layout(error: str = "") -> html.Div:
-    """Login form — uses a plain HTML POST so Flask handles auth and redirects."""
-    return html.Div(
-        dbc.Row(
-            dbc.Col(
-                dbc.Card(
-                    dbc.CardBody([
-                        html.Div([
-                            html.Span("❤", style={"color": PRIMARY, "fontSize": "2rem"}),
-                            html.H4("RSSS", className="d-inline ms-2 fw-bold",
-                                    style={"color": SIDEBAR_BG}),
-                        ], className="text-center mb-1"),
-                        html.P("Rwanda Stunting Surveillance System",
-                               className="text-center text-muted mb-4",
-                               style={"fontSize": "0.8rem"}),
+def login_layout(error: str = "", embedded: bool = False) -> html.Div:
+    """Login form — uses a plain HTML POST so Flask handles auth and redirects.
+    embedded=True → shown as a page inside the public shell."""
+    return html.Div(html.Div([
+        html.Div([
+            html.Div(className="nhic-flag"),
+            _brand(with_logo=False),
+            html.Div(PRODUCT, className="nhic-login-title"),
+            html.Div(PRODUCT_FULL, className="nhic-login-sub fw-semibold"),
+            html.Div("Monthly stunting surveillance, at-risk follow-up and reporting "
+                     "for every district hospital and health facility.",
+                     className="nhic-login-sub mt-2"),
+            html.Div("Ministry of Health, Rwanda · in partnership with RBC",
+                     className="nhic-login-foot"),
+        ], className="nhic-login-brand"),
 
-                        html.Div(
-                            dbc.Alert(error, color="danger", className="py-2"),
-                            style={"display": "block" if error else "none"},
-                        ),
-
-                        # Plain HTML form — POSTs to Flask route, triggers real page reload
-                        html.Form([
-                            dbc.Label("Username",
-                                      style={"fontSize": "0.82rem", "fontWeight": "600"}),
-                            dcc.Input(
-                                name="username", type="text", placeholder="username",
-                                autoFocus=True, required=True,
-                                className="form-control mb-3",
-                                style={"fontSize": "0.9rem", "borderRadius": "6px"},
-                            ),
-                            dbc.Label("Password",
-                                      style={"fontSize": "0.82rem", "fontWeight": "600"}),
-                            dcc.Input(
-                                name="password", type="password", placeholder="••••••••",
-                                required=True,
-                                className="form-control mb-4",
-                                style={"fontSize": "0.9rem", "borderRadius": "6px"},
-                            ),
-                            html.Button(
-                                "Sign in", type="submit",
-                                className="btn btn-danger w-100 fw-semibold",
-                            ),
-                        ], action="/rsss_app/do-login", method="post"),
-                    ]),
-                    style={"borderRadius": "12px",
-                           "boxShadow": "0 4px 24px rgba(0,0,0,.12)"},
-                ),
-                xs=12, sm=8, md=5, lg=4, xl=3,
-            ),
-            justify="center", align="center",
-            style={"minHeight": "100vh"},
-        ),
-        style={"background": "#F0F2F5"},
-    )
+        html.Div([
+            html.Div(_logo(full=True), className="nhic-login-logo"),
+            html.H5("Sign in"),
+            html.P("Use the account issued by NHIC.", className="nhic-hint mb-4"),
+            dbc.Alert(error, color="danger", className="py-2", is_open=bool(error)),
+            # Plain HTML form — POSTs to Flask route, triggers real page reload
+            html.Form([
+                html.Label("Username", htmlFor="login-username", className="mb-1"),
+                dcc.Input(id="login-username", name="username", type="text",
+                          autoComplete="username", autoFocus=True, required=True,
+                          className="form-control mb-3"),
+                html.Label("Password", htmlFor="login-password", className="mb-1"),
+                dcc.Input(id="login-password", name="password", type="password",
+                          autoComplete="current-password", required=True,
+                          className="form-control mb-4"),
+                html.Button("Sign in", type="submit", className="btn btn-nhic w-100 py-2"),
+            ], action=f"{_BASE}/do-login", method="post"),
+        ], className="nhic-login-form"),
+    ], className="nhic-login"), className="nhic-login-bg" + (" nhic-login-embedded" if embedded else ""))
 
 
 def serve_layout() -> html.Div:
     """Called by Dash on every page request — reads Flask session."""
     from flask import session as flask_session, request as flask_req
-    user = flask_session.get("user")
-    if not user:
+    from auth import current_user
+    user = current_user()            # signed-in user, else the public visitor
+    if not user:                     # public view switched off → login page
         try:
             err = "Invalid username or password." if flask_req.args.get("login_error") else ""
         except Exception:
