@@ -304,15 +304,28 @@ def _load_all_from_db() -> pd.DataFrame | None:
         from config.db_local import get_local_conn
         conn = get_local_conn()
         print("[data] Loading ALL vaccinated children from local PostgreSQL…")
-        cur = conn.cursor()
+        cur = conn.cursor(name="all_children_stream")   # server-side cursor
+        cur.itersize = 200_000
         cur.execute(_SQL_ALL)
-        cols = [d[0] for d in cur.description]
-        rows = cur.fetchall()
+        frames, cols = [], None
+        while True:
+            batch = cur.fetchmany(200_000)
+            if not batch:
+                break
+            # A server-side cursor only fills .description after the first fetch.
+            cols = cols or [d[0] for d in cur.description]
+            frames.append(pd.DataFrame(batch, columns=cols))
         cur.close(); conn.close()
-        if not rows:
+        if not frames:
             print("[data] All-children query returned 0 rows — trying CSV.")
             return None
-        df = _derive_severe(_normalise(pd.DataFrame(rows, columns=cols)))
+        df = pd.concat(frames, ignore_index=True)
+        del frames
+        df = _derive_severe(_normalise(df))
+        for _c in ["province", "district", "district_hospital",
+                   "health_facility", "sector", "stunting_status"]:
+            if _c in df.columns:
+                df[_c] = df[_c].astype("category")
         print(f"[data] {len(df):,} total records (all children) from PostgreSQL.")
         return df
     except Exception as exc:
@@ -913,19 +926,18 @@ def refresh_after_sync() -> None:
             with _child_lock:
                 _child_state["status"] = "error"
             print(f"[data] post-sync cache update failed: {exc}")
-        # Flat tables (stunted-by-column rows, all-children denominators):
-        # load fresh copies outside the locks, then swap.
-        for loader, lock, cache in ((_load_from_db, _lock, _cache),
-                                    (_load_all_from_db, _all_lock, _all_cache)):
-            try:
-                df = loader()
-                if df is not None:
-                    with lock:
-                        cache["df"], cache["ts"] = df, time.time()
-                        if cache is _cache:
-                            cache["source"] = "postgresql"
-            except Exception as exc:
-                print(f"[data] post-sync reload failed: {exc}")
+        # Stunted-by-column rows (Risk/Reports pages): load a fresh copy
+        # outside the lock, then swap. get_all_df() is deliberately NOT
+        # pre-loaded — no page calls it, and it would pin ~0.5–2 GB for nothing.
+        try:
+            df = _load_from_db()
+            if df is not None:
+                with _lock:
+                    _cache["df"], _cache["ts"], _cache["source"] = df, time.time(), "postgresql"
+        except Exception as exc:
+            print(f"[data] post-sync reload failed: {exc}")
+        with _all_lock:
+            _all_cache.clear()
         with _meas_lock:
             _meas_cache.clear()
 
