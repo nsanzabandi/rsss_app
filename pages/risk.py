@@ -796,7 +796,6 @@ def register_callbacks(app) -> None:
                              className="py-2 mt-2"), True
 
         try:
-            from data import invalidate_cache
             job = get_sync_job(jid)
             if not job:
                 return no_update, True
@@ -807,13 +806,8 @@ def register_callbacks(app) -> None:
                            if d not in job.get("totals", {})]
             done        = job["status"] in ("completed", "failed")
 
-            if done and job["status"] == "completed":
-                invalidate_cache()
-                # Pre-warm the heavy per-child table now (mirrors app.py's
-                # auto-sync loop) so the next dashboard visitor doesn't pay
-                # the ~2 min rebuild cost on their own page load.
-                from data import warm_child_level
-                warm_child_level()
+            # Dashboard caches are refreshed by the sync job itself
+            # (sync/etl.py → data.refresh_after_sync), incrementally.
 
             prog = _progress_ui(
                 done_count, total_rows, 30, active_dist,

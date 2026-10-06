@@ -137,6 +137,7 @@ class HospitalReportGenerator:
         output_path: str,
         total_vaccinated: int = 0,
         report_level: str = "hospital",
+        total_assessed: int = 0,
     ) -> bool:
         """
         Create a PDF stunting report (standard RSSS layout) for a hospital or
@@ -155,7 +156,10 @@ class HospitalReportGenerator:
             avg_age     = stats.get("avg_age_months")
             sched       = stats.get("schedule_breakdown", {})
             vacc        = total_vaccinated or 0
-            pct_vacc    = round(total / vacc * 100, 1) if vacc else 0
+            # Rate is over ASSESSED children (usable height/DOB) — same as the
+            # dashboard and the trend chart, so all three show the same %.
+            denom       = total_assessed or vacc
+            pct_vacc    = round(total / denom * 100, 1) if denom else 0
             safe_name   = _safe(name)
             safe_dist   = _safe(district)
             RED         = (192, 57, 43)
@@ -190,8 +194,8 @@ class HospitalReportGenerator:
             pdf.set_text_color(*RED); pdf.set_font("Helvetica", "B", 12)
             pdf.cell(bw, 7, "IMMEDIATE ACTION REQUIRED", ln=True, align="C")
             pdf.set_x(bx); pdf.set_font("Helvetica", "", 10)
-            pdf.cell(bw, 6, _safe(f"Identified {total:,} stunted out of {vacc:,} "
-                                  f"vaccinated ({pct_vacc}%)"), ln=True, align="C")
+            pdf.cell(bw, 6, _safe(f"Identified {total:,} stunted out of {denom:,} "
+                                  f"children assessed ({pct_vacc}%)"), ln=True, align="C")
             pdf.set_x(bx)
             pdf.cell(bw, 6, "Provide nutrition counseling and coordinate follow-up",
                      ln=True, align="C")
@@ -204,7 +208,9 @@ class HospitalReportGenerator:
             pdf.ln(1)
             pdf.set_font("Helvetica", "", 11)
             pdf.cell(0, 6, _safe(f"Total Stunted Children: {total:,} out of "
-                                 f"{vacc:,} vaccinated ({pct_vacc}%)"), ln=True)
+                                 f"{denom:,} assessed ({pct_vacc}%)"), ln=True)
+            if vacc:
+                pdf.cell(0, 6, _safe(f"Children Vaccinated This Period: {vacc:,}"), ln=True)
             if avg_age:
                 pdf.cell(0, 6, _safe(f"Average Age: {avg_age} months"), ln=True)
             if sched:
@@ -299,6 +305,7 @@ class HospitalReportGenerator:
         output_path: str,
         total_vaccinated: int = 0,
         hospital_summary: list[dict] | None = None,
+        total_assessed: int = 0,
         risk_summary: dict | None = None,
         district_summary: list[dict] | None = None,
     ) -> bool:
@@ -325,7 +332,10 @@ class HospitalReportGenerator:
             total       = stats.get("total_stunted_children", 0)
             avg_age     = stats.get("avg_age_months")
             vacc        = total_vaccinated or 0
-            pct_vacc    = round(total / vacc * 100, 1) if vacc else 0
+            # Rate is over ASSESSED children (usable height/DOB) — same as the
+            # dashboard and the trend chart, so all three show the same %.
+            denom       = total_assessed or vacc
+            pct_vacc    = round(total / denom * 100, 1) if denom else 0
             RED         = (192, 57, 43)
 
             pdf = _PDF(title="National Stunting Surveillance Overview")
@@ -358,8 +368,8 @@ class HospitalReportGenerator:
             pdf.set_text_color(*RED); pdf.set_font("Helvetica", "B", 12)
             pdf.cell(bw, 7, "NATIONAL SUMMARY", ln=True, align="C")
             pdf.set_x(bx); pdf.set_font("Helvetica", "", 10)
-            pdf.cell(bw, 6, _safe(f"Identified {total:,} stunted out of {vacc:,} "
-                                  f"vaccinated ({pct_vacc}%) nationally"), ln=True, align="C")
+            pdf.cell(bw, 6, _safe(f"Identified {total:,} stunted out of {denom:,} "
+                                  f"children assessed ({pct_vacc}%) nationally"), ln=True, align="C")
             pdf.set_x(bx)
             n_hosp = len(hospital_summary or [])
             pdf.cell(bw, 6, _safe(f"Across {n_hosp} hospitals reporting this period"),
@@ -372,7 +382,9 @@ class HospitalReportGenerator:
             pdf.ln(1)
             pdf.set_font("Helvetica", "", 11)
             pdf.cell(0, 6, _safe(f"Total Stunted Children (national): {total:,} out of "
-                                 f"{vacc:,} vaccinated ({pct_vacc}%)"), ln=True)
+                                 f"{denom:,} assessed ({pct_vacc}%)"), ln=True)
+            if vacc:
+                pdf.cell(0, 6, _safe(f"Children Vaccinated This Period: {vacc:,}"), ln=True)
             if avg_age:
                 pdf.cell(0, 6, _safe(f"Average Age: {avg_age} months"), ln=True)
             pdf.ln(5)
@@ -462,7 +474,7 @@ class HospitalReportGenerator:
 
                 def _district_header():
                     pdf.set_font("Helvetica", "B", 9)
-                    for w, h in zip(cw, ["District", "Vaccinated", "Stunted", "Prevalence %"]):
+                    for w, h in zip(cw, ["District", "Assessed", "Stunted", "Prevalence %"]):
                         pdf.cell(w, 8, h, border=1, align="C")
                     pdf.ln()
                     pdf.set_font("Helvetica", "", 9)

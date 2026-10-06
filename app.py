@@ -225,9 +225,8 @@ def _start_auto_sync() -> None:
                 from sync.etl import run_incremental_sync
                 run_incremental_sync()
                 import data
-                data.invalidate_cache()
-                data.warm_child_level()      # rebuild computed tables in background
-                print("[auto-sync] done — caches refreshed.")
+                data.refresh_after_sync()    # incremental, in the background
+                print("[auto-sync] done — dashboard refresh started.")
             except Exception as exc:
                 print(f"[auto-sync] failed: {exc}")
 

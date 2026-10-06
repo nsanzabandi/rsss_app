@@ -631,13 +631,7 @@
       "hospital_contact_person": "DG",
       "nutrition_coordinator_email": "danielnsanzabandi@gmail.com",
       "nutrition_coordinator_name": "VM",
-      "district_health_officers": [
-        {
-          "name": "BYIRINGIRO Jean Paul",
-          "email": "jpbyiringiro2@gmail.com",
-          "role": "District Health Officer"
-        }
-      ],
+      "district_health_officers": [],
       "phone": "",
       "active": true
     },

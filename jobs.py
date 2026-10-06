@@ -185,6 +185,7 @@ def _send_national_overview(
         hospital_summary = nat.get_hospital_summary(hosp_groups)
         district_summary = nat.get_district_summary(loader.all_df, loader.stunted_df)
         total_vaccinated = loader.get_total_vaccinated_unique()
+        total_assessed   = loader.get_total_assessed_unique()
 
         stats = dict(total_stunted_children=total, avg_age_months=avg_age,
                     age_distribution=age_dist)
@@ -198,9 +199,15 @@ def _send_national_overview(
             monthly = _data.get_monthly_df_stale_ok()
             if monthly is not None and not monthly.empty:
                 m = _data.monthly_rate(monthly)
-                trend_flat = {ts.strftime("%b %Y"): y for ts, y in zip(m["month"], m["y"])}
+                trend_flat = dict(zip(m["month"], m["y"]))
         except Exception as exc:
             log.warning(f"Trend chart data unavailable: {exc}")
+        # The report month's point comes from THIS run's numbers, not the
+        # (up to a few hours old) dashboard cache, so the chart's last point
+        # always equals the summary percentage printed above it.
+        if total_assessed:
+            trend_flat[pd.Timestamp(year=year, month=month, day=1)] = round(total / total_assessed * 100, 1)
+        trend_flat = {ts.strftime("%b %Y"): y for ts, y in sorted(trend_flat.items())}
 
         # At-risk (growth-velocity) — reuse if the caller already computed it
         # for the hospital reports in this same run, else compute fresh.
@@ -232,6 +239,7 @@ def _send_national_overview(
         rep_gen.create_national_overview_pdf(
             stats, charts, year, month, pdf_path,
             total_vaccinated=total_vaccinated, hospital_summary=hospital_summary,
+            total_assessed=total_assessed,
             risk_summary=risk_summary, district_summary=district_summary)
 
         for cf in charts.values():
@@ -251,7 +259,7 @@ def _send_national_overview(
         body = EmailSender(log).create_overview_email_body(
             month, year, stats, n_hospitals=len(hospital_summary),
             total_vaccinated=total_vaccinated, dashboard_link=view_link,
-            hospitals_notified=hospitals_notified)
+            hospitals_notified=hospitals_notified, total_assessed=total_assessed)
         subject = f"National Stunting Overview {month:02d}/{year}"
 
         sender = EmailSender(log)
@@ -331,6 +339,7 @@ def _run_hospital_reports(
             return
 
         vacc_counts   = loader.get_vaccinated_counts_by_hospital()
+        assessed_counts = loader.get_assessed_counts_by("district_hospital")
         contacts_path = BASE_DIR / "config" / "hospital_emails.json"
         contacts: dict = {}
         if contacts_path.exists():
@@ -407,7 +416,8 @@ def _run_hospital_reports(
                 excel = str(reports_dir / f"{safe}_Cases.xlsx")
                 rep_gen.create_pdf_report(name, district, stats, charts,
                                           year, month, pdf,
-                                          total_vaccinated=total_vacc)
+                                          total_vaccinated=total_vacc,
+                                          total_assessed=assessed_counts.get(name, 0))
                 rep_gen.create_excel_report(df, excel)
 
                 for cf in charts.values():
@@ -568,6 +578,7 @@ def _run_facility_reports(
             return
 
         vacc_counts   = loader.get_vaccinated_counts_by_facility()
+        assessed_counts = loader.get_assessed_counts_by("health_facility")
         contacts_path = BASE_DIR / "config" / "health_facility_emails.json"
         contacts: dict = {}
         if contacts_path.exists():
@@ -622,7 +633,8 @@ def _run_facility_reports(
                 rep_gen.create_pdf_report(name, district, stats, charts,
                                           year, month, pdf,
                                           total_vaccinated=total_vacc,
-                                          report_level="facility")
+                                          report_level="facility",
+                                          total_assessed=assessed_counts.get(name, 0))
                 rep_gen.create_excel_report(df, excel)
 
                 for cf in charts.values():
@@ -707,6 +719,25 @@ def _run_facility_reports(
 
 # ── Public launchers ───────────────────────────────────────────────────────────
 
+def _run_awake(target, *args, **kwargs) -> None:
+    """Run a job while blocking idle system sleep. On a Mac the OS otherwise
+    suspends the process mid-run (a 5-minute September run took 24 minutes,
+    19 of them asleep). No-op on Linux/Docker servers."""
+    proc = None
+    if sys.platform == "darwin":
+        try:
+            import subprocess
+            proc = subprocess.Popen(["caffeinate", "-i", "-w", str(os.getpid())])
+        except OSError:
+            proc = None
+    try:
+        target(*args, **kwargs)
+    finally:
+        if proc:
+            proc.terminate()
+
+
+
 def start_hospital_job(
     hospitals: list[str],
     month: int,
@@ -720,8 +751,8 @@ def start_hospital_job(
         hospitals=hospitals, month=month, year=year,
         send_emails=send_emails, dry_run=dry_run, send_overview=send_overview))
     threading.Thread(
-        target=_run_hospital_reports,
-        args=(jid, hospitals, month, year, send_emails, triggered_by),
+        target=_run_awake,
+        args=(_run_hospital_reports, jid, hospitals, month, year, send_emails, triggered_by),
         kwargs={"dry_run": dry_run, "send_overview": send_overview},
         daemon=True,
     ).start()
@@ -741,8 +772,8 @@ def start_facility_job(
         facilities=facilities, month=month, year=year,
         send_emails=send_emails, dry_run=dry_run, send_overview=send_overview))
     threading.Thread(
-        target=_run_facility_reports,
-        args=(jid, facilities, month, year, send_emails, triggered_by),
+        target=_run_awake,
+        args=(_run_facility_reports, jid, facilities, month, year, send_emails, triggered_by),
         kwargs={"dry_run": dry_run, "send_overview": send_overview},
         daemon=True,
     ).start()

@@ -98,7 +98,10 @@ class NationalSummaryAnalytics:
         """
         if "district" not in all_df.columns:
             return []
-        vacc = self._unique(all_df[all_df["district"].notna()]).groupby("district").size()
+        base = all_df[all_df["district"].notna()]
+        if "haz_calc" in base.columns:   # assessed only — matches the summary rate
+            base = base[base["haz_calc"].notna()]
+        vacc = self._unique(base).groupby("district").size()
         stu  = (self._unique(stunted_df[stunted_df["district"].notna()]).groupby("district").size()
                if stunted_df is not None and not stunted_df.empty and "district" in stunted_df.columns
                else pd.Series(dtype=int))

@@ -209,6 +209,7 @@ class EmailSender:
         total_vaccinated: int = 0,
         dashboard_link: str | None = None,
         hospitals_notified: int = 0,
+        total_assessed: int = 0,
     ) -> str:
         """National overview email body — for senior/ministry officials
         (config/national_report_recipients.json), distinct from the
@@ -217,7 +218,8 @@ class EmailSender:
         from config.app_config import (SUPPORT_PHONE, SUPPORT_CONTACT,
                                         SUPPORT_EMAIL, ORG_NAME, ORG_DIVISION)
         total     = stats.get("total_stunted_children", 0)
-        pct       = round(total / total_vaccinated * 100, 1) if total_vaccinated else 0
+        denom     = total_assessed or total_vaccinated
+        pct       = round(total / denom * 100, 1) if denom else 0
         generated = datetime.now().strftime("%Y-%m-%d %H:%M")
 
         lines = [
@@ -228,7 +230,8 @@ class EmailSender:
             "",
             "National Summary:",
             f"- Total stunted children (national): {total:,}",
-            f"- Total vaccinated (denominator): {total_vaccinated:,} ({pct}% stunted)",
+            f"- Children assessed (denominator): {denom:,} ({pct}% stunted)",
+            f"- Total vaccinated this period: {total_vaccinated:,}",
             f"- Hospitals reporting this period: {n_hospitals}",
             f"- Report generated: {generated}",
             "",

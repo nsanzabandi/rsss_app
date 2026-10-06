@@ -15,7 +15,8 @@ class EmailConfig:
     FROM_ADDRESS  = os.environ.get("EMAIL_FROM",     "RSSS Stunting Reports <danielnsanzabandi@gmail.com>")
     USE_TLS       = True
     TIMEOUT       = 30          # seconds
-    RATE_LIMIT_DELAY = 2        # seconds between sends
+    # Pause between sends. Was a fixed 2s — ~2 min of pure waiting per run.
+    RATE_LIMIT_DELAY = float(os.environ.get("EMAIL_RATE_LIMIT_DELAY", "0.5"))
 
 
 email_config = EmailConfig()

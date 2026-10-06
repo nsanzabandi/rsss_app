@@ -17,7 +17,8 @@ data.py's warm_child_level()/get_child_df() etc. already check this disk
 cache first and fall back to an in-process build only if it's missing/stale.
 
 Usage — run once manually:
-    python -m tools.build_child_cache
+    python -m tools.build_child_cache          # incremental: only children changed since last build
+    python -m tools.build_child_cache --full   # recompute everything
 
 Usage — on a schedule (recommended, every 15-30 min):
     # crontab -e
@@ -43,16 +44,13 @@ def main() -> int:
     t0 = time.time()
     print(f"[build_child_cache] starting…")
 
-    meas = data.get_measurements_df()
-    if meas is None or meas.empty:
-        print("[build_child_cache] no measurements available — aborting")
+    try:
+        mode = data.update_child_cache(full="--full" in sys.argv)
+    except Exception as exc:
+        print(f"[build_child_cache] failed: {exc}")
         return 1
 
-    child, monthly, schedule, visits = data._build_child_and_monthly(meas)
-    data.save_child_cache_to_disk(child, monthly, schedule, visits)
-
-    print(f"[build_child_cache] done in {time.time()-t0:.1f}s — "
-          f"{len(child):,} children, {len(visits):,} visits")
+    print(f"[build_child_cache] {mode} — done in {time.time()-t0:.1f}s")
     return 0
 
 

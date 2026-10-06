@@ -17,7 +17,7 @@ import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 # Make the project root importable when run as a script (python sync/etl.py …),
@@ -172,6 +172,18 @@ def create_table() -> None:
         CREATE INDEX IF NOT EXISTS idx_iv_imm_date     ON immunization_vaccination(last_immunization_date);
         CREATE INDEX IF NOT EXISTS idx_iv_stunting     ON immunization_vaccination(stunting_status);
         CREATE INDEX IF NOT EXISTS idx_iv_dob          ON immunization_vaccination(date_of_birth);
+        -- Lets the dashboard find just the children touched by the last sync.
+        CREATE INDEX IF NOT EXISTS idx_iv_fetched_at   ON immunization_vaccination(fetched_at);
+
+        -- Incremental ("sync") bookmark per district: everything UPDATED in
+        -- eTracker before synced_through has been fetched. Only advanced after
+        -- the district's whole window finishes cleanly, so a failed or
+        -- interrupted sync is simply retried from the same point next time.
+        CREATE TABLE IF NOT EXISTS sync_state (
+            district        TEXT PRIMARY KEY,
+            synced_through  DATE NOT NULL,
+            updated_at      TIMESTAMP DEFAULT NOW()
+        );
 
         -- Tracks per-page fetch progress for each (district, month-chunk) window
         -- of a fixed-window sync (initial / range / month). Lets a restarted
@@ -373,16 +385,58 @@ def _upsert_rows(rows_df: pd.DataFrame, district_name: str) -> int:
             rotavirus, measles_rubella, hpv, district_source, last_updated_on
         ) VALUES %s
         ON CONFLICT (event_id) DO UPDATE SET
+            -- every column: an edit in eTracker (DOB, sex, MUAC, vaccines…)
+            -- must overwrite the local copy, since stunting is computed from it
             entity_id              = EXCLUDED.entity_id,
-            weight_visit_kg        = EXCLUDED.weight_visit_kg,
-            height_visit_cm        = EXCLUDED.height_visit_cm,
-            stunting_status        = EXCLUDED.stunting_status,
-            wasting_status         = EXCLUDED.wasting_status,
-            next_visit_date        = EXCLUDED.next_visit_date,
-            immunization_schedule  = EXCLUDED.immunization_schedule,
+            child_id               = EXCLUDED.child_id,
+            first_name             = EXCLUDED.first_name,
+            family_name            = EXCLUDED.family_name,
+            child_name             = EXCLUDED.child_name,
+            date_of_birth          = EXCLUDED.date_of_birth,
+            gender                 = EXCLUDED.gender,
+            place_of_birth         = EXCLUDED.place_of_birth,
+            twins                  = EXCLUDED.twins,
+            weight_at_birth_kg     = EXCLUDED.weight_at_birth_kg,
+            height_at_birth_cm     = EXCLUDED.height_at_birth_cm,
+            mother_names           = EXCLUDED.mother_names,
+            mother_phone           = EXCLUDED.mother_phone,
+            mother_dob             = EXCLUDED.mother_dob,
+            mother_education       = EXCLUDED.mother_education,
+            mother_id              = EXCLUDED.mother_id,
+            father_names           = EXCLUDED.father_names,
+            father_phone           = EXCLUDED.father_phone,
+            residence_province     = EXCLUDED.residence_province,
+            residence_district     = EXCLUDED.residence_district,
+            residence_sector       = EXCLUDED.residence_sector,
+            village                = EXCLUDED.village,
+            health_facility        = EXCLUDED.health_facility,
             h_district_hospital    = EXCLUDED.h_district_hospital,
             h_district             = EXCLUDED.h_district,
             h_sector               = EXCLUDED.h_sector,
+            h_cell                 = EXCLUDED.h_cell,
+            h_village              = EXCLUDED.h_village,
+            facility_hierarchy     = EXCLUDED.facility_hierarchy,
+            last_immunization_date = EXCLUDED.last_immunization_date,
+            age_visit_years        = EXCLUDED.age_visit_years,
+            age_visit_months       = EXCLUDED.age_visit_months,
+            weight_visit_kg        = EXCLUDED.weight_visit_kg,
+            height_visit_cm        = EXCLUDED.height_visit_cm,
+            muac_cm                = EXCLUDED.muac_cm,
+            stunting_status        = EXCLUDED.stunting_status,
+            wasting_status         = EXCLUDED.wasting_status,
+            weight_status          = EXCLUDED.weight_status,
+            immunization_schedule  = EXCLUDED.immunization_schedule,
+            next_visit_date        = EXCLUDED.next_visit_date,
+            vaccination_site       = EXCLUDED.vaccination_site,
+            bcg                    = EXCLUDED.bcg,
+            opv                    = EXCLUDED.opv,
+            hep_b_birth            = EXCLUDED.hep_b_birth,
+            dpt_hepb_hib           = EXCLUDED.dpt_hepb_hib,
+            pneumococcal           = EXCLUDED.pneumococcal,
+            rotavirus              = EXCLUDED.rotavirus,
+            measles_rubella        = EXCLUDED.measles_rubella,
+            hpv                    = EXCLUDED.hpv,
+            district_source        = EXCLUDED.district_source,
             last_updated_on        = EXCLUDED.last_updated_on,
             fetched_at             = NOW()
     """
@@ -432,6 +486,54 @@ def _get_last_updated(district_name: str) -> str:
         return "2024-07-01"
 
 
+def _incremental_start(district_name: str) -> str:
+    """Start of the next incremental (LAST_UPDATED) window for a district:
+    its bookmark, or — first run after upgrading — the newest last_updated_on
+    already stored, which is exactly the point the old sync had reached."""
+    try:
+        conn = _get_conn()
+        cur  = conn.cursor()
+        cur.execute("SELECT synced_through FROM sync_state WHERE district = %s",
+                    (district_name,))
+        row = cur.fetchone()
+        cur.close(); conn.close()
+        if row:
+            return row[0].strftime("%Y-%m-%d")
+    except Exception:
+        pass
+    return _get_last_updated(district_name)
+
+
+def _save_incremental_mark(district_name: str, through: str) -> None:
+    conn = _get_conn()
+    cur  = conn.cursor()
+    cur.execute(
+        "INSERT INTO sync_state (district, synced_through, updated_at) VALUES (%s, %s, NOW()) "
+        "ON CONFLICT (district) DO UPDATE SET synced_through = EXCLUDED.synced_through, "
+        "updated_at = NOW()",
+        (district_name, through),
+    )
+    conn.commit()
+    cur.close(); conn.close()
+
+
+def _sync_district_incremental(district_id: str, district_name: str,
+                               progress_cb=None) -> tuple[str, int, bool]:
+    """Fetch everything updated in eTracker since this district's bookmark.
+    The window starts ON the bookmark day (re-fetching that day is harmless —
+    upserts are idempotent) and the bookmark only moves to today if every
+    chunk completed, so nothing is skipped after a failure."""
+    start, today = _incremental_start(district_name), _today()
+    if start >= today:
+        start = today
+    end = (datetime.strptime(today, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+    name, n, ok = _fetch_district(district_id, district_name, start, end,
+                                  progress_cb, None, time_field="LAST_UPDATED")
+    if ok:
+        _save_incremental_mark(district_name, today)
+    return name, n, ok
+
+
 # ── HTTP helpers ───────────────────────────────────────────────────────────────
 
 def _make_session() -> requests.Session:
@@ -469,10 +571,22 @@ def _fetch_district(
     end_date: str,
     progress_cb=None,   # optional callable(district_name, rows_so_far)
     resume_key: tuple[str, str, str] | None = None,
-) -> tuple[str, int]:
+    time_field: str = "EVENT_DATE",
+) -> tuple[str, int, bool]:
+    """Fetch one district's events in [start_date, end_date].
+
+    time_field="EVENT_DATE"   → window is on the visit date (initial/month/range)
+    time_field="LAST_UPDATED" → window is on when the record was last changed in
+                                eTracker (incremental sync) — catches late data
+                                entry and edits to old visits, which an
+                                event-date window silently misses.
+    Returns (district, rows_fetched, ok) — ok is False if any chunk stopped on
+    an HTTP error.
+    """
     session          = _make_session()
     total_fetched    = 0
     all_chunks_done  = True   # stays True only if every chunk was skip-resumed
+    all_ok           = True
     chunks           = _month_chunks(start_date, end_date)
 
     for chunk_start, chunk_end in chunks:
@@ -500,6 +614,7 @@ def _fetch_district(
                         "pageSize":   1000,
                         "page":       page,
                         "outputType": "EVENT",
+                        "timeField":  time_field,
                     },
                     timeout=120,
                 )
@@ -553,12 +668,15 @@ def _fetch_district(
         if chunk_ok:
             _save_chunk_progress(resume_key, district_name, chunk_start, chunk_end,
                                  last_page=page, done=True)
+        else:
+            all_ok = False
 
     if all_chunks_done and resume_key is not None:
         _log(f"  {district_name} DONE — already up to date (all chunks previously synced)")
     else:
-        _log(f"  {district_name} DONE — {total_fetched:,} rows")
-    return district_name, total_fetched
+        _log(f"  {district_name} DONE — {total_fetched:,} rows"
+             + ("" if all_ok else "  (INCOMPLETE — will retry next sync)"))
+    return district_name, total_fetched, all_ok
 
 
 # ── Public sync functions ──────────────────────────────────────────────────────
@@ -588,7 +706,7 @@ def run_initial_load(start_date: str = "2025-07-01",
             for did, dname in DISTRICTS.items()
         }
         for future in as_completed(futures):
-            name, count = future.result()
+            name, count, _ok = future.result()
             totals[name] = count
     return totals
 
@@ -619,7 +737,7 @@ def run_month_load(year: int, month: int, workers: int = 3,
             for did, dname in DISTRICTS.items()
         }
         for future in as_completed(futures):
-            name, count = future.result()
+            name, count, _ok = future.result()
             totals[name] = count
     return totals
 
@@ -630,14 +748,11 @@ def run_incremental_sync(workers: int = 3) -> dict:
     totals: dict[str, int] = {}
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futures = {
-            ex.submit(
-                _fetch_district, did, dname,
-                _get_last_updated(dname), _today(),
-            ): dname
+            ex.submit(_sync_district_incremental, did, dname): dname
             for did, dname in DISTRICTS.items()
         }
         for future in as_completed(futures):
-            name, count = future.result()
+            name, count, _ok = future.result()
             totals[name] = count
     return totals
 
@@ -698,11 +813,14 @@ def start_sync_job(mode: str = "sync",
             with ThreadPoolExecutor(max_workers=3) as ex:
                 futures = {}
                 for did, dname in DISTRICTS.items():
+                    if mode == "sync":
+                        futures[ex.submit(_sync_district_incremental, did, dname, _cb)] = dname
+                        continue
                     s, e = _window(dname)
                     futures[ex.submit(_fetch_district, did, dname, s, e,
                                       _cb, resume_key)] = dname
                 for future in as_completed(futures):
-                    name, count = future.result()
+                    name, count, _ok = future.result()
                     results[name] = count
                     with _sync_lock:
                         _sync_jobs[jid]["totals"] = results
@@ -712,10 +830,11 @@ def start_sync_job(mode: str = "sync",
                 _sync_jobs[jid]["totals"] = results
             _log(f"Sync job {jid} complete — {sum(results.values()):,} total rows")
 
-            # Refresh dashboard caches so new data shows without a restart.
+            # Refresh dashboard caches (incrementally, in the background) so
+            # new data shows without a restart or a full rebuild.
             try:
                 import data
-                data.invalidate_cache()
+                data.refresh_after_sync()
             except Exception:
                 pass
 

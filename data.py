@@ -386,12 +386,16 @@ _meas_cache: dict = {}
 _meas_lock = threading.Lock()
 
 
-def _load_measurements() -> pd.DataFrame | None:
+def _load_measurements(ids: list[str] | None = None) -> pd.DataFrame | None:
+    """All visits, or (ids given) the full visit history of just those children."""
     try:
         from config.db_local import get_local_conn
         conn = get_local_conn()
         cur = conn.cursor()
-        cur.execute(_MEAS_SQL)
+        if ids is None:
+            cur.execute(_MEAS_SQL)
+        else:
+            cur.execute(_MEAS_SQL + " WHERE entity_id = ANY(%s)", (ids,))
         cols = [d[0] for d in cur.description]
         rows = cur.fetchall()
         cur.close(); conn.close()
@@ -401,6 +405,9 @@ def _load_measurements() -> pd.DataFrame | None:
         print(f"[data] {len(df):,} raw measurement rows from PostgreSQL.")
         return df
     except Exception as exc:
+        if ids is not None:
+            print(f"[data] Measurements for changed children unavailable ({exc}).")
+            return None
         print(f"[data] Measurements from DB unavailable ({exc}) — trying CSV.")
         if not _CSV_PATH.exists():
             return None
@@ -458,23 +465,43 @@ def _disk_cache_paths() -> dict:
     }
 
 
+def _read_meta() -> dict:
+    import json
+    try:
+        return json.loads(_disk_cache_paths()["meta"].read_text())
+    except Exception:
+        return {}
+
+
+def _write_meta(meta: dict) -> None:
+    import json, os
+    path = _disk_cache_paths()["meta"]
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(meta))
+    os.replace(tmp, path)
+
+
 def save_child_cache_to_disk(child: pd.DataFrame, monthly: pd.DataFrame,
-                             schedule: pd.DataFrame, visits: pd.DataFrame) -> None:
+                             schedule: pd.DataFrame, visits: pd.DataFrame,
+                             data_as_of: str | None = None) -> None:
     """Persist the built tables to disk and update the in-memory cache.
 
-    Called by both warm_child_level()'s in-process worker (so a manually
-    triggered rebuild is also durable across restarts) and by the standalone
-    tools/build_child_cache.py script.
+    data_as_of: DB MAX(fetched_at) read before the build — the watermark the
+    next incremental update (update_child_cache) diffs against.
+    Each file is written to a temp name then renamed, so the app never reads
+    a half-written pickle while an update is in progress.
     """
-    import json
+    import os
     _DISK_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     paths = _disk_cache_paths()
-    child.to_pickle(paths["child"])
-    monthly.to_pickle(paths["monthly"])
-    schedule.to_pickle(paths["schedule"])
-    visits.to_pickle(paths["visits"])
+    for key, frame in (("child", child), ("monthly", monthly),
+                       ("schedule", schedule), ("visits", visits)):
+        tmp = paths[key].with_suffix(".tmp")
+        frame.to_pickle(tmp)
+        os.replace(tmp, paths[key])
     built_at = time.time()
-    paths["meta"].write_text(json.dumps({"built_at": built_at, "n_children": len(child)}))
+    _write_meta({"built_at": built_at, "n_children": len(child), "data_as_of": data_as_of,
+                 "format": _CACHE_FORMAT})
     with _child_lock:
         _child_cache["child"]    = child
         _child_cache["monthly"]  = monthly
@@ -598,37 +625,78 @@ def _build_child_and_monthly(
     # HAZ-computable visits (slimmed to just what period summaries need) so
     # build_period_child_df() can answer that correctly, cheaply, without
     # re-running add_computed_stunting().
-    visits_cols = [c for c in ("province", "district", "district_hospital") if c in valid.columns]
+    # health_facility + immunization_schedule are kept so the monthly and
+    # schedule aggregates can be rebuilt from this table alone — which is
+    # what lets update_child_cache() refresh them without a full rebuild.
+    visits_cols = [c for c in ("province", "district", "district_hospital",
+                               "health_facility", "immunization_schedule")
+                   if c in valid.columns]
     if "event_id" in valid.columns:
         visits_cols = ["event_id"] + visits_cols
     visits = valid[[tei] + visits_cols].copy()
     visits["immunization_date"] = valid["_o"]
     visits["is_stunted"] = valid["haz_calc"] < -2
     visits["is_severe"]  = valid["haz_calc"] < -3
-    visits = visits.rename(columns={tei: "tracked_entity_instance"})
+    visits = _compact(visits.rename(columns={tei: TEI}))
+
+    monthly, schedule = _aggregate_visits(visits)
+    return child, monthly, schedule, visits
+
+
+# Repeated text columns in the visits table — stored as categoricals, which
+# keeps ~3.5M rows from costing hundreds of MB of duplicate strings.
+_VISIT_CAT_COLS = ("province", "district", "district_hospital",
+                   "health_facility", "immunization_schedule")
+
+
+def _compact(visits: pd.DataFrame) -> pd.DataFrame:
+    for c in _VISIT_CAT_COLS:
+        if c in visits.columns and not isinstance(visits[c].dtype, pd.CategoricalDtype):
+            visits[c] = visits[c].astype("category")
+    return visits
+
+
+def _aggregate_visits(visits: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Monthly trend + by-schedule tables, derived from the visits table."""
+    geo = [c for c in ("province", "district", "district_hospital", "health_facility")
+           if c in visits.columns]
+    sort_cols = (["immunization_date", "event_id"] if "event_id" in visits.columns
+                 else ["immunization_date"])
 
     # ── monthly × geo aggregates for the trend (computed stunting) ────────────
+    # One row per child per month — their LATEST visit that month — the same
+    # cohort rule the monthly reports use (core/data_loader.py), so a month's
+    # trend point equals that month's report summary. Counting visits instead
+    # double-counted children seen twice in a month, and grouping by geo
+    # without dropna=False silently dropped every child with a blank
+    # province/district/hospital/facility (~5% of children).
     today = pd.Timestamp.today().normalize()
-    vv = valid[valid["_o"].notna() & (valid["_o"] <= today)].copy()
-    vv["month"] = vv["_o"].dt.to_period("M").dt.to_timestamp()
-    gcols = ["month"] + geo
-    monthly = (vv.groupby(gcols)
-                 .agg(measured=(tei, "nunique"),
-                      stunted=("_stunted", "sum"),
-                      severe=("_severe", "sum"))
+    vv = visits[visits["immunization_date"].notna()
+                & (visits["immunization_date"] <= today)].copy()
+    vv["month"] = vv["immunization_date"].dt.to_period("M").dt.to_timestamp()
+    vv = vv.sort_values(sort_cols).drop_duplicates(subset=[TEI, "month"], keep="last")
+    monthly = (vv.groupby(["month"] + geo, dropna=False, observed=True)
+                 .agg(measured=(TEI, "size"),
+                      stunted=("is_stunted", "sum"),
+                      severe=("is_severe", "sum"))
                  .reset_index())
 
     # ── stunting by immunization schedule (EPI visit) × geo ───────────────────
     schedule = pd.DataFrame()
-    if "immunization_schedule" in valid.columns:
-        sv = valid[valid["immunization_schedule"].notna()].copy()
-        scols = ["immunization_schedule"] + geo
-        schedule = (sv.groupby(scols)
-                      .agg(measured=(tei, "nunique"),
-                           stunted=("_stunted", "sum"),
-                           severe=("_severe", "sum"))
+    if "immunization_schedule" in visits.columns:
+        sv = visits[visits["immunization_schedule"].notna()]
+        schedule = (sv.groupby(["immunization_schedule"] + geo, observed=True)
+                      .agg(measured=(TEI, "nunique"),
+                           stunted=("is_stunted", "sum"),
+                           severe=("is_severe", "sum"))
                       .reset_index())
-    return child, monthly, schedule, visits
+
+    # Plain object columns downstream (dashboard filters/labels), not categoricals.
+    for frame in (monthly, schedule):
+        for c in frame.columns:
+            if isinstance(frame[c].dtype, pd.CategoricalDtype):
+                frame[c] = frame[c].astype(object)
+    return monthly, schedule
 
 
 def get_child_df() -> pd.DataFrame | None:
@@ -711,19 +779,155 @@ def warm_child_level() -> None:
 
     def _worker():
         try:
-            meas = get_measurements_df()
-            if meas is None or meas.empty:
-                with _child_lock:
-                    _child_state["status"] = "error"
-                return
-            child, monthly, schedule, visits = _build_child_and_monthly(meas)
-            save_child_cache_to_disk(child, monthly, schedule, visits)
-            print(f"[data] Child-level table ready ({len(child):,} children).")
+            update_child_cache()   # incremental when a disk cache exists, else full
         except Exception as exc:
             import traceback; traceback.print_exc()
             with _child_lock:
                 _child_state["status"] = "error"
             print(f"[data] Child-level build failed: {exc}")
+
+    threading.Thread(target=_worker, daemon=True).start()
+
+
+# ── Incremental refresh (after an eTracker sync) ───────────────────────────────
+# A full rebuild recomputes WHO stunting for all ~3.8M visits (~2.5 min). After
+# a sync, only children with new/edited rows can change, so we recompute just
+# those children's full histories and merge them into the cached tables.
+
+_FULL_REBUILD_SHARE = 0.4    # if this share of children changed, a full rebuild is cheaper
+_CACHE_FORMAT       = 2      # bump when the cached tables' shape changes → forces one full rebuild
+
+
+def _db_data_version() -> str | None:
+    """Newest fetched_at in the local DB — the incremental watermark."""
+    try:
+        from config.db_local import get_local_conn
+        conn = get_local_conn(); cur = conn.cursor()
+        cur.execute("SELECT MAX(fetched_at) FROM immunization_vaccination")
+        v = cur.fetchone()[0]
+        cur.close(); conn.close()
+        return v.isoformat() if v else None
+    except Exception:
+        return None
+
+
+def _changed_children(since: str) -> list[str] | None:
+    """Children with any row fetched after `since` (10-min overlap so a sync
+    transaction that started before the watermark was read isn't missed —
+    re-processing a few extra children is harmless)."""
+    try:
+        from config.db_local import get_local_conn
+        conn = get_local_conn(); cur = conn.cursor()
+        cur.execute("SELECT DISTINCT entity_id FROM immunization_vaccination "
+                    "WHERE fetched_at > %s::timestamp - INTERVAL '10 minutes' "
+                    "AND entity_id IS NOT NULL", (since,))
+        ids = [r[0] for r in cur.fetchall()]
+        cur.close(); conn.close()
+        return ids
+    except Exception as exc:
+        print(f"[data] could not list changed children: {exc}")
+        return None
+
+
+def update_child_cache(full: bool = False) -> str:
+    """Bring the computed per-child cache up to date with the DB.
+
+    Returns "full", "incremental" or "unchanged". Falls back to a full rebuild
+    when there's no usable cache yet, the cache predates this format, or so
+    many children changed that recomputing everything is cheaper.
+    """
+    version = _db_data_version()   # read BEFORE loading, so rows landing mid-build are picked up next time
+    meta = _read_meta()
+    paths = _disk_cache_paths()
+
+    usable = bool(not full and meta.get("data_as_of") and meta.get("format") == _CACHE_FORMAT
+                  and paths["child"].exists() and paths["visits"].exists())
+
+    ids = None
+    if usable:
+        ids = ([] if version == meta["data_as_of"]          # DB unchanged — skip the query
+               else _changed_children(meta["data_as_of"]))
+        if ids is not None and len(ids) > _FULL_REBUILD_SHARE * max(meta.get("n_children", 0), 1):
+            print(f"[data] {len(ids):,} children changed — full rebuild is cheaper")
+            ids = None
+
+    child = visits = None
+    if ids:
+        try:
+            child  = pd.read_pickle(paths["child"])
+            visits = pd.read_pickle(paths["visits"])
+        except Exception as exc:
+            print(f"[data] cached tables unreadable ({exc}) — full rebuild")
+            ids = None
+
+    t0 = time.time()
+    if ids is None:
+        meas = _load_measurements()
+        if meas is None or meas.empty:
+            raise RuntimeError("no measurements available")
+        child, monthly, schedule, visits = _build_child_and_monthly(meas)
+        save_child_cache_to_disk(child, monthly, schedule, visits, data_as_of=version)
+        print(f"[data] Child cache FULL rebuild: {len(child):,} children in {time.time()-t0:.0f}s")
+        return "full"
+
+    if not ids:
+        # Nothing new — the cache is still accurate, just mark it fresh so the
+        # 2h staleness check doesn't trigger a pointless rebuild.
+        built_at = time.time()
+        _write_meta({**meta, "built_at": built_at, "data_as_of": version or meta["data_as_of"]})
+        with _child_lock:
+            if "child" in _child_cache:
+                _child_cache["ts"] = built_at
+            _child_state["status"] = "done"
+        print("[data] Child cache already up to date.")
+        return "unchanged"
+
+    meas = _load_measurements(ids)
+    if meas is None:
+        raise RuntimeError("could not load changed children")
+    c_new, _, _, v_new = _build_child_and_monthly(meas)
+    ids_set = set(ids)
+    child  = pd.concat([child[~child[TEI].isin(ids_set)], c_new], ignore_index=True)
+    visits = _compact(pd.concat([visits[~visits[TEI].isin(ids_set)], v_new], ignore_index=True))
+    monthly, schedule = _aggregate_visits(visits)
+    save_child_cache_to_disk(child, monthly, schedule, visits, data_as_of=version)
+    print(f"[data] Child cache INCREMENTAL update: {len(ids):,} changed children "
+          f"({len(meas):,} visits) in {time.time()-t0:.0f}s")
+    return "incremental"
+
+
+def refresh_after_sync() -> None:
+    """Call after an eTracker sync: update every dashboard cache in the
+    background. The old data keeps being served until each new table is
+    ready, then it's swapped in — users never wait on a reload."""
+    with _child_lock:
+        if _child_state["status"] == "running":
+            return
+        _child_state["status"] = "running"
+
+    def _worker():
+        try:
+            update_child_cache()
+        except Exception as exc:
+            import traceback; traceback.print_exc()
+            with _child_lock:
+                _child_state["status"] = "error"
+            print(f"[data] post-sync cache update failed: {exc}")
+        # Flat tables (stunted-by-column rows, all-children denominators):
+        # load fresh copies outside the locks, then swap.
+        for loader, lock, cache in ((_load_from_db, _lock, _cache),
+                                    (_load_all_from_db, _all_lock, _all_cache)):
+            try:
+                df = loader()
+                if df is not None:
+                    with lock:
+                        cache["df"], cache["ts"] = df, time.time()
+                        if cache is _cache:
+                            cache["source"] = "postgresql"
+            except Exception as exc:
+                print(f"[data] post-sync reload failed: {exc}")
+        with _meas_lock:
+            _meas_cache.clear()
 
     threading.Thread(target=_worker, daemon=True).start()
 

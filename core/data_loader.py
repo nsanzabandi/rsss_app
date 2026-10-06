@@ -104,9 +104,13 @@ class StuntingDataLoader:
         id_sql = f"""
             SELECT DISTINCT {s['tei']}
             FROM {s['table']}
-            WHERE EXTRACT(YEAR  FROM {s['imm_date']}) = %(year)s
-              AND EXTRACT(MONTH FROM {s['imm_date']}) = %(month)s
+            WHERE {s['imm_date']} >= %(start)s
+              AND {s['imm_date']} <  %(end)s
         """
+        # Plain range (not EXTRACT) so Postgres can use the date index.
+        from datetime import date
+        period_start = date(year, month, 1)
+        period_end   = date(year + (month == 12), month % 12 + 1, 1)
         sql = f"""
             SELECT {core}{extra}{event_id_col}
             FROM {s['table']}
@@ -115,7 +119,7 @@ class StuntingDataLoader:
         try:
             conn = self._connect()
             cur  = conn.cursor()
-            cur.execute(id_sql, {"year": year, "month": month})
+            cur.execute(id_sql, {"start": period_start, "end": period_end})
             child_ids = [r[0] for r in cur.fetchall() if r[0]]
             if not child_ids:
                 cur.close()
@@ -172,6 +176,10 @@ class StuntingDataLoader:
         # dashboard totals diverge for the same period.
         tei = "tracked_entity_instance"
         latest = self.all_df
+        # Latest ASSESSABLE visit, as the dashboard and trend chart do — a
+        # child's unmeasurable last visit shouldn't hide an earlier valid one.
+        if "haz_calc" in latest.columns and latest["haz_calc"].notna().any():
+            latest = latest[latest["haz_calc"].notna()]
         if tei in latest.columns and not latest.empty:
             if "immunization_date" in latest.columns:
                 # event_id as a secondary sort key so ties on the same visit
@@ -287,6 +295,35 @@ class StuntingDataLoader:
         if tei in self.all_df.columns:
             return int(self.all_df[tei].nunique())
         return len(self.all_df)
+
+    # ── Assessed counts (stunting-rate denominator) ────────────────────────────
+    # A child with no usable height/DOB can't be classified, so they don't
+    # belong in the prevalence denominator — same rule as the dashboard
+    # (data.summarize_children) and the trend chart (data.monthly_rate).
+
+    def _assessed_latest(self) -> pd.DataFrame | None:
+        """One row per child (latest visit this period) with a computable HAZ."""
+        tei = "tracked_entity_instance"
+        if self.all_df is None or self.all_df.empty or "haz_calc" not in self.all_df.columns:
+            return None
+        df = self.all_df[self.all_df["haz_calc"].notna()]
+        if tei in df.columns:
+            sort_cols = (["immunization_date", "event_id"]
+                         if "event_id" in df.columns else ["immunization_date"])
+            df = df.sort_values(sort_cols).drop_duplicates(subset=[tei], keep="last")
+        return df
+
+    def get_total_assessed_unique(self) -> int:
+        df = self._assessed_latest()
+        return len(df) if df is not None else 0
+
+    def get_assessed_counts_by(self, col: str) -> dict[str, int]:
+        """Assessed children per hospital/facility, attributed to the same
+        (latest) visit the stunted count uses — so numerator ⊆ denominator."""
+        df = self._assessed_latest()
+        if df is None or col not in df.columns:
+            return {}
+        return df.groupby(col).size().to_dict()
 
     def get_vaccinated_counts_by_facility(self) -> dict[str, int]:
         """Count all children vaccinated per health facility."""
