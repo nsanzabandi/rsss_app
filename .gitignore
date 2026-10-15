@@ -30,10 +30,9 @@ logs/*.log
 logs/*.log.*
 
 # ── SQLite databases ───────────────────────────────────────────────────────────
-# users.db is managed manually on the server — do NOT auto-commit it
-# (it may be checked in intentionally to seed user accounts — remove
-#  this line only if you want to track it in git)
-# config/users.db
+# users.db holds every account + password hash and differs per server —
+# never commit it. Create the first admin with tools/reset_admin.py.
+config/users.db
 
 # ── macOS ──────────────────────────────────────────────────────────────────────
 .DS_Store

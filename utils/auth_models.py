@@ -1,16 +1,44 @@
 """
 utils/auth_models.py — SQLite user database for RSSS authentication.
 
-Passwords are stored as SHA-256 hex digests.
-Database file: config/users.db
+Passwords are stored as salted PBKDF2-SHA256 hashes (werkzeug format).
+Accounts created before that still hold a plain SHA-256 digest; it is
+accepted once and replaced with the new hash at that user's next login.
+Database file: config/users.db (not in git — it holds every account).
 """
 from __future__ import annotations
 
 import hashlib
+import hmac
 import sqlite3
 from pathlib import Path
 
+from werkzeug.security import check_password_hash, generate_password_hash
+
 _DB_PATH = Path(__file__).parent.parent / "config" / "users.db"
+_METHOD  = "pbkdf2:sha256:600000"
+
+
+def hash_password(password: str) -> str:
+    return generate_password_hash(password, method=_METHOD)
+
+
+def _is_legacy(stored: str) -> bool:
+    """Old unsalted SHA-256 hex digest (64 hex chars, no '$' separators)."""
+    return len(stored) == 64 and all(c in "0123456789abcdef" for c in stored.lower())
+
+
+def check_password(stored: str | None, password: str) -> tuple[bool, bool]:
+    """(matches, needs_rehash) for a stored hash."""
+    if not stored:
+        return False, False
+    if _is_legacy(stored):
+        ok = hmac.compare_digest(stored, hashlib.sha256(password.encode()).hexdigest())
+        return ok, ok
+    try:
+        return check_password_hash(stored, password), False
+    except ValueError:          # unknown/corrupt hash format
+        return False, False
 
 
 class UserDatabase:
@@ -54,7 +82,7 @@ class UserDatabase:
         health_center: str | None = None,
         email: str = "",
     ) -> bool:
-        hashed = hashlib.sha256(password.encode()).hexdigest()
+        hashed = hash_password(password)
         try:
             with self._conn() as conn:
                 conn.execute(
@@ -79,7 +107,10 @@ class UserDatabase:
         user = self.get_user(username)
         if not user or not user.get("active"):
             return False
-        return user["password"] == hashlib.sha256(password.encode()).hexdigest()
+        ok, rehash = check_password(user["password"], password)
+        if rehash:
+            self.update_user(username, password=password)   # upgrade the legacy hash
+        return ok
 
     def get_all_users(self) -> list[dict]:
         with self._conn() as conn:
@@ -91,7 +122,7 @@ class UserDatabase:
 
     def update_user(self, username: str, **fields) -> bool:
         if "password" in fields:
-            fields["password"] = hashlib.sha256(fields["password"].encode()).hexdigest()
+            fields["password"] = hash_password(fields["password"])
         if not fields:
             return False
         sets   = ", ".join(f"{k}=?" for k in fields)

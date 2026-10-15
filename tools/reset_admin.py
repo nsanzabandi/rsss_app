@@ -8,7 +8,6 @@ Usage (from the project root):
 
 Stop the running app first (Ctrl-C) so the SQLite file isn't locked.
 """
-import hashlib
 import sqlite3
 import sys
 from pathlib import Path
@@ -23,7 +22,9 @@ def main() -> int:
         username = "admin"
         password = sys.argv[1] if len(sys.argv) == 2 else "ChangeMe@2026"
 
-    h = hashlib.sha256(password.encode()).hexdigest()
+    sys.path.insert(0, str(DB.parent.parent))
+    from utils.auth_models import hash_password
+    h = hash_password(password)
     con = sqlite3.connect(DB)
     cur = con.cursor()
     cur.execute("SELECT 1 FROM users WHERE username=?", (username,))

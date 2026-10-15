@@ -6,7 +6,6 @@ No external auth packages required.
 """
 from __future__ import annotations
 
-import hashlib
 import sys
 from pathlib import Path
 
@@ -42,8 +41,7 @@ def authenticate_user(username: str, password: str) -> dict | None:
         user = db.get_user(username.strip())
         if not user or not user.get("active"):
             return None
-        hashed = hashlib.sha256(password.encode()).hexdigest()
-        if user["password"] != hashed:
+        if not db.verify_password(user["username"], password):
             return None
         return {
             "username":      user["username"],
