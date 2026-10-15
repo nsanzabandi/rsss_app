@@ -20,7 +20,7 @@ from datetime import datetime
 from pathlib import Path
 
 import dash_bootstrap_components as dbc
-from dash import Input, Output, State, dash_table, dcc, html, no_update
+from dash import ALL, Input, Output, State, ctx, dash_table, dcc, html, no_update
 
 BASE_DIR        = Path(__file__).resolve().parent.parent
 HOSPITALS_JSON  = BASE_DIR / "config" / "hospital_emails.json"
@@ -172,7 +172,14 @@ def layout(user: dict) -> html.Div:
 
 
 def _users_tab(geo: dict) -> html.Div:
+    from config.app_config import ACCOUNT_HELP_NAME, ACCOUNT_HELP_PHONE
     return dbc.Row([
+        dbc.Col(_card("Pending account requests", "bi-person-plus",
+                      [html.Div(id="set-req-list"), html.Div(id="set-req-msg")],
+                      "Requests from the Request access page. Check the person and their "
+                      "area, then approve or reject. After approving you can still change the "
+                      "role or area below. Help contact for applicants: "
+                      f"{ACCOUNT_HELP_NAME} ({ACCOUNT_HELP_PHONE})."), lg=12),
         dbc.Col(_card("Accounts", "bi-people", html.Div(id="set-users-table"),
                       "Everyone who can sign in. Inactive accounts can't sign in but keep "
                       "their history."), lg=7),
@@ -462,13 +469,75 @@ def _users_table(users: list[dict]) -> html.Div:
                      html.Div(u["username"], className="nhic-hint")]),
             html.Td(role_label(u.get("role", ""))),
             html.Td(scope),
-            html.Td(dbc.Badge("Active" if u.get("active") else "Inactive",
-                              color="success" if u.get("active") else "secondary")),
+            html.Td(dbc.Badge("Pending" if u.get("status") == "pending" else
+                              "Active" if u.get("active") else "Inactive",
+                              color="warning" if u.get("status") == "pending" else
+                              "success" if u.get("active") else "secondary")),
         ]))
     return html.Div(dbc.Table([
         html.Thead(html.Tr([html.Th("Name"), html.Th("Role"), html.Th("Scope"), html.Th("Status")])),
         html.Tbody(rows),
     ], size="sm", hover=True, className="mb-0"), className="nhic-table-wrap")
+
+
+def _requests_list(reqs: list[dict]) -> html.Div:
+    from auth import role_label
+    if not reqs:
+        return html.Div("No requests waiting.", className="nhic-hint")
+    rows = []
+    for r in reqs:
+        area = r.get("health_center") or r.get("hospital") or r.get("district") or "—"
+        rows.append(html.Tr([
+            html.Td([html.Div(r.get("full_name") or r["username"], className="fw-semibold"),
+                     html.Div(f"{r['username']} · {r.get('position') or ''}", className="nhic-hint")]),
+            html.Td([html.Div(role_label(r.get("role", ""))), html.Div(area, className="nhic-hint")]),
+            html.Td([html.Div(r.get("email") or ""), html.Div(r.get("phone") or "", className="nhic-hint")]),
+            html.Td((r.get("requested_at") or "").replace("T", " ")[:16], className="nhic-hint"),
+            html.Td(html.Div([
+                dbc.Button("Approve", id={"type": "set-req-ok", "u": r["username"]},
+                           size="sm", className="btn-nhic"),
+                dbc.Button("Reject", id={"type": "set-req-no", "u": r["username"]},
+                           size="sm", color="light"),
+            ], className="d-flex gap-2")),
+        ]))
+    return html.Div(dbc.Table([
+        html.Thead(html.Tr([html.Th("Applicant"), html.Th("Role / area"), html.Th("Contact"),
+                            html.Th("Requested"), html.Th("")])),
+        html.Tbody(rows),
+    ], size="sm", hover=True, className="mb-0"), className="nhic-table-wrap")
+
+
+def _email_applicant(user: dict, approved: bool) -> None:
+    """Tell the applicant the outcome, in the background (best effort)."""
+    import threading
+    to = (user or {}).get("email")
+    if not to:
+        return
+
+    def _send():
+        try:
+            from config.app_config import APP_BASE_URL, ACCOUNT_HELP_NAME, ACCOUNT_HELP_PHONE
+            from core.email_sender import EmailSender
+            sender = EmailSender()
+            if not sender.connect():
+                return
+            name = user.get("full_name") or user["username"]
+            if approved:
+                body = (f"Dear {name},\n\nYour RSSS account has been approved. Sign in with "
+                        f"your username '{user['username']}' and the password you chose:\n"
+                        f"{APP_BASE_URL}/login\n")
+            else:
+                body = (f"Dear {name},\n\nYour RSSS account request was not approved. "
+                        f"If you think this is a mistake, contact {ACCOUNT_HELP_NAME} "
+                        f"({ACCOUNT_HELP_PHONE}).\n")
+            body += "\nRBC Stunting Surveillance"
+            sender.send_email(to_email=to, cc_emails=[], attachments=[],
+                              subject="Your RSSS account" + (" is ready" if approved else " request"),
+                              body=body)
+            sender.disconnect()
+        except Exception as exc:
+            print(f"[settings] applicant email failed: {exc}")
+    threading.Thread(target=_send, daemon=True).start()
 
 
 def _user_pick_options(users: list[dict]) -> list[dict]:
@@ -492,6 +561,40 @@ def register_callbacks(app) -> None:
         from utils.auth_models import UserDatabase
         users = UserDatabase().get_all_users()
         return _users_table(users), _user_pick_options(users)
+
+    # Account requests: list (initial load and after every decision)
+    @app.callback(Output("set-req-list", "children"),
+                  Input("set-tabs", "active_tab"), Input("set-req-msg", "children"))
+    def _load_requests(_tab, _m):
+        if not _is_admin():
+            return "Not authorised."
+        from utils.auth_models import UserDatabase
+        return _requests_list(UserDatabase().pending_requests())
+
+    # Account requests: approve / reject
+    @app.callback(Output("set-req-msg", "children"),
+                  Output("set-u-msg", "children", allow_duplicate=True),
+                  Input({"type": "set-req-ok", "u": ALL}, "n_clicks"),
+                  Input({"type": "set-req-no", "u": ALL}, "n_clicks"),
+                  prevent_initial_call=True)
+    def _review_request(_ok, _no):
+        if not _is_admin():
+            return _msg("Not authorised.", "danger"), no_update
+        trig = ctx.triggered_id
+        if not trig or not (ctx.triggered and ctx.triggered[0].get("value")):
+            return no_update, no_update          # list re-rendered, not a click
+        from utils.auth_models import UserDatabase
+        db = UserDatabase()
+        username, approve = trig["u"], trig["type"] == "set-req-ok"
+        user = db.get_user(username)
+        me = (_user() or {}).get("username", "admin")
+        if not user or not db.review_request(username, approve, me):
+            return _msg("That request was already handled.", "warning"), no_update
+        _email_applicant(user, approve)
+        text = (f"Approved '{username}' — they can sign in now." if approve
+                else f"Rejected the request from '{username}'.")
+        # Also poke set-u-msg so the Accounts table and picker refresh.
+        return _msg(text), (_msg(text) if approve else no_update)
 
     # Users: fill the form from the picked account
     @app.callback(Output("set-u-username", "value"), Output("set-u-username", "disabled"),
@@ -622,6 +725,8 @@ def register_callbacks(app) -> None:
 
         fields = dict(full_name=(full_name or "").strip() or username, role=role,
                       email=email, active=int(bool(active)), **scope)
+        if active:
+            fields["status"] = "active"      # activating a pending request approves it
         if is_new:
             db.create_user(username, password, full_name=fields["full_name"], role=role,
                            email=email, **scope)

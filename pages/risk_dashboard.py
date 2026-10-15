@@ -23,6 +23,7 @@ import plotly.graph_objects as go
 from dash import Input, Output, State, dcc, html, no_update
 
 from components.kpi import metric_card
+from auth import is_aggregate_only
 
 _HIGH, _MED = "#B03A2E", "#E0A100"
 _FONT = dict(family="Inter,system-ui,sans-serif", size=12, color="#1F2D3D")
@@ -354,7 +355,7 @@ def register_callbacks(app) -> None:
         table = (dbc.Alert([html.I(className="bi bi-lock me-2"),
                             "Sign in to see the children to follow up."],
                            color="light", className="py-2 mb-0")
-                 if user.get("public") else _table(r))
+                 if is_aggregate_only(user) else _table(r))
         return (kpis, _reasons_fig(sm), _trend_fig(user, province, district, hospital, start, end),
                 _hotspots_fig(r, _next_level(user, province, district, hospital)), _age_fig(r),
                 table)

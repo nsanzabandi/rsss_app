@@ -27,6 +27,8 @@ import plotly.graph_objects as go
 from dash import Input, Output, State, dcc, html, no_update
 import dash_bootstrap_components as dbc
 
+from auth import is_aggregate_only
+
 _LBL  = {"fontSize": "0.78rem", "fontWeight": "600", "color": "#5D6D7E"}
 _DD   = {"fontSize": "0.82rem"}
 _RED  = "#C0392B"
@@ -116,7 +118,7 @@ def layout(user: dict) -> html.Div:
         dbc.Tabs(
             [dbc.Tab(label="Dashboard",      tab_id="risk-dash")]
             # child lists + operations need a login
-            + ([] if user.get("public") else [dbc.Tab(label="Missed Appts", tab_id="missed")])
+            + ([] if is_aggregate_only(user) else [dbc.Tab(label="Missed Appts", tab_id="missed")])
             # eTracker sync is operational — hidden for view-only link users.
             # eTracker sync is a national operation — ministry administrators only.
             + ([dbc.Tab(label="Sync eTracker", tab_id="sync")]
@@ -359,7 +361,7 @@ def register_callbacks(app) -> None:
             return _sync_tab()
         if tab == "guide":
             return _pipeline_guide_tab()
-        if user.get("public") and tab not in ("risk-dash", "guide"):
+        if is_aggregate_only(user) and tab not in ("risk-dash", "guide"):
             tab = "risk-dash"
         if tab == "missed":
             return _missed_tab(user)

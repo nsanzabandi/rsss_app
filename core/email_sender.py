@@ -44,6 +44,11 @@ def build_cc_list_from_contact(contact: dict) -> list[str]:
     return list(dict.fromkeys(cc))   # deduplicate, preserve order
 
 
+def _register_url() -> str:
+    from config.app_config import APP_BASE_URL
+    return f"{APP_BASE_URL}/register"
+
+
 class EmailSender:
     def __init__(self, log: "ReportLogger | None" = None):
         # log is optional: callers like the /test-email route and the risk page
@@ -184,8 +189,13 @@ class EmailSender:
         if dashboard_link:
             lines += [
                 "",
-                "View your live dashboard (your catchment only, no login needed):",
+                "View your live dashboard (your catchment only, no login needed; "
+                "the link works for two months):",
                 dashboard_link,
+                "",
+                "To see the children to follow up, request a staff account "
+                "(approved by RBC):",
+                _register_url(),
             ]
         lines += [
             "",
@@ -247,8 +257,11 @@ class EmailSender:
         if dashboard_link:
             lines += [
                 "",
-                "View the live national dashboard:",
+                "View the live national dashboard (no login needed; the link works for two months):",
                 dashboard_link,
+                "",
+                "Staff who need full access can request an account (approved by RBC):",
+                _register_url(),
             ]
         lines += [
             "",

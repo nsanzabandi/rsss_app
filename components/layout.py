@@ -98,7 +98,7 @@ def _sidebar(user: dict | None = None) -> html.Div:
     operations = [_nav_link("Monthly Reports", "/reports", "bi-file-earmark-text")] if can_report else []
     operations += [_nav_link("Follow-Up", "/followup", "bi-clipboard2-pulse")]
     nutrition  = [_nav_link("eBuzima",          "/ebuzima",  "bi-clipboard2-data")]
-    if public:                      # public view: dashboards only
+    if public or user.get("view_link"):     # public view / email link: dashboards only
         operations, nutrition = [], []
     admin      = [_nav_link("Settings",         "/settings", "bi-gear")] if is_admin else []
 
@@ -116,6 +116,8 @@ def _sidebar(user: dict | None = None) -> html.Div:
             _freshness(),
             html.Div("Public view — sign in for reports, follow-up and child lists.",
                      className="nhic-partner") if public else None,
+            html.Div("View-only link — sign in for follow-up and child lists.",
+                     className="nhic-partner") if user.get("view_link") else None,
             html.Div("Ministry of Health · in partnership with RBC", className="nhic-partner"),
         ], className="nhic-foot"),
     ], id="sidebar", className="nhic-sidebar")
@@ -208,8 +210,140 @@ def login_layout(error: str = "", embedded: bool = False) -> html.Div:
                           className="form-control mb-4"),
                 html.Button("Sign in", type="submit", className="btn btn-nhic w-100 py-2"),
             ], action=f"{_BASE}/do-login", method="post"),
+            html.Div(["No account yet? ",
+                      html.A("Request access", href=f"{_BASE}/register")],
+                     className="nhic-hint mt-3 text-center"),
         ], className="nhic-login-form"),
     ], className="nhic-login"), className="nhic-login-bg" + (" nhic-login-embedded" if embedded else ""))
+
+
+_REQUEST_ROLES = [("health_center", "Health centre staff"), ("hospital", "Hospital staff"),
+                  ("district", "District officer")]
+
+
+def register_layout(message: str = "", ok: bool = False, embedded: bool = False) -> html.Div:
+    """Account request form — a plain HTML POST to /do-register (works with
+    the public view on or off). The request waits for a ministry admin's
+    approval in Settings → Users & roles."""
+    from config.app_config import ACCOUNT_HELP_NAME, ACCOUNT_HELP_PHONE
+    try:
+        from pages.settings import _geo_options
+        geo = _geo_options()
+    except Exception:
+        geo = {"district": [], "district_hospital": [], "health_facility": []}
+
+    def _select(name, label, values, placeholder, required=False):
+        return html.Div([
+            html.Label(label, htmlFor=f"reg-{name}", className="mb-1"),
+            html.Select([html.Option(placeholder, value="")]
+                        + [html.Option(v, value=v) for v in values],
+                        id=f"reg-{name}", name=name, required=required,
+                        className="form-select mb-3"),
+        ])
+
+    def _input(name, label, kind="text", auto=None, hint=None, required=True):
+        return html.Div([
+            html.Label(label, htmlFor=f"reg-{name}", className="mb-1"),
+            dcc.Input(id=f"reg-{name}", name=name, type=kind, required=required,
+                      autoComplete=auto, className="form-control" + ("" if hint else " mb-3")),
+            html.Div(hint, className="nhic-hint mb-3") if hint else None,
+        ])
+
+    help_box = html.Div([
+        html.Div("Need help with your request?", className="fw-semibold"),
+        html.Div(f"{ACCOUNT_HELP_NAME} · {ACCOUNT_HELP_PHONE}"),
+    ], className="nhic-hint mt-3")
+
+    if ok:
+        body = [html.H5("Request sent"),
+                dbc.Alert(message, color="success", className="py-2"),
+                html.P("You'll be able to sign in once an administrator approves your "
+                       "account. This usually takes one working day.", className="nhic-hint"),
+                html.A("Back to sign in", href=f"{_BASE}/login", className="btn btn-nhic btn-sm"),
+                help_box]
+    else:
+        body = [
+            html.H5("Request access"),
+            html.P("For health staff who receive RSSS reports. An administrator checks "
+                   "every request before the account can sign in.", className="nhic-hint mb-3"),
+            dbc.Alert(message, color="danger", className="py-2", is_open=bool(message)),
+            html.Form([
+                _input("full_name", "Full name", auto="name"),
+                _input("position", "Position / job title", hint="e.g. Nutrition officer, Gisenyi DH"),
+                _input("email", "Work email", kind="email", auto="email"),
+                _input("phone", "Phone number", kind="tel", auto="tel"),
+                html.Div([
+                    html.Label("I work at", htmlFor="reg-role", className="mb-1"),
+                    html.Select([html.Option(l, value=v) for v, l in _REQUEST_ROLES],
+                                id="reg-role", name="role", className="form-select mb-3"),
+                ]),
+                _select("district", "District", geo["district"], "Select your district", required=True),
+                _select("hospital", "Hospital (hospital or health-centre staff)",
+                        geo["district_hospital"], "Select your hospital"),
+                _select("health_center", "Health centre (health-centre staff)",
+                        geo["health_facility"], "Select your health centre"),
+                _input("username", "Choose a username", auto="username",
+                       hint="3–32 characters: lowercase letters, digits, . _ -"),
+                _input("password", "Choose a password", kind="password", auto="new-password",
+                       hint="At least 8 characters"),
+                # Honeypot: hidden from people, filled in by form-spamming bots.
+                html.Div(dcc.Input(name="website", type="text", autoComplete="off"),
+                         style={"position": "absolute", "left": "-9999px"}, **{"aria-hidden": "true"}),
+                html.Button("Send request", type="submit", className="btn btn-nhic w-100 py-2"),
+            ], action=f"{_BASE}/do-register", method="post"),
+            html.Div(["Already have an account? ", html.A("Sign in", href=f"{_BASE}/login")],
+                     className="nhic-hint mt-3 text-center"),
+            help_box,
+        ]
+    return html.Div(html.Div([
+        html.Div([
+            html.Div(className="nhic-flag"),
+            _brand(with_logo=False),
+            html.Div(PRODUCT, className="nhic-login-title"),
+            html.Div(PRODUCT_FULL, className="nhic-login-sub fw-semibold"),
+            html.Div("Signed-in staff see the children to follow up in their own "
+                     "district, hospital or health centre.", className="nhic-login-sub mt-2"),
+            html.Div("Ministry of Health, Rwanda · in partnership with RBC",
+                     className="nhic-login-foot"),
+        ], className="nhic-login-brand"),
+        html.Div([html.Div(_logo(full=True), className="nhic-login-logo")] + body,
+                 className="nhic-login-form"),
+    ], className="nhic-login"), className="nhic-login-bg" + (" nhic-login-embedded" if embedded else ""))
+
+
+def login_message(args) -> str:
+    """Sign-in page message from the redirect's query string."""
+    from config.app_config import ACCOUNT_HELP_NAME, ACCOUNT_HELP_PHONE
+    if args.get("pending"):
+        return ("Your account request is waiting for approval. For help, contact "
+                f"{ACCOUNT_HELP_NAME} ({ACCOUNT_HELP_PHONE}).")
+    if args.get("rejected"):
+        return ("Your account request was not approved. Contact "
+                f"{ACCOUNT_HELP_NAME} ({ACCOUNT_HELP_PHONE}) if you think this is a mistake.")
+    if args.get("link_expired"):
+        return ("This dashboard link has expired or is not valid. Use the link in the "
+                "latest monthly report email, or sign in.")
+    if args.get("login_error"):
+        return "Invalid username or password."
+    return ""
+
+
+_REGISTER_ERRORS = {
+    "fields":   "Please fill in every field.",
+    "username": "Username: 3–32 characters, lowercase letters, digits, . _ - only.",
+    "taken":    "That username is already taken. Choose another.",
+    "password": "Password must be at least 8 characters.",
+    "email":    "That email address doesn't look valid.",
+    "area":     "Choose the district, hospital or health centre you work at. "
+                "The hospital must be in the chosen district, and the health centre in that hospital's catchment.",
+    "busy":     "Too many requests from this connection. Please try again in an hour.",
+}
+
+
+def register_message(args) -> tuple[str, bool]:
+    if args.get("sent"):
+        return "Your request has been sent to the RSSS administrators.", True
+    return _REGISTER_ERRORS.get(args.get("error", ""), ""), False
 
 
 def serve_layout() -> html.Div:
@@ -219,7 +353,12 @@ def serve_layout() -> html.Div:
     user = current_user()            # signed-in user, else the public visitor
     if not user:                     # public view switched off → login page
         try:
-            err = "Invalid username or password." if flask_req.args.get("login_error") else ""
+            args = flask_req.args
+            err = login_message(args)
+            if flask_req.path.rstrip("/").endswith("/register"):
+                msg, ok = register_message(args)
+                return html.Div([dcc.Location(id="url", refresh=False),
+                                 html.Div(register_layout(msg, ok), id="root-container")])
         except Exception:
             err = ""
         return html.Div([

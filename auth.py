@@ -41,7 +41,7 @@ def authenticate_user(username: str, password: str) -> dict | None:
         user = db.get_user(username.strip())
         if not user or not user.get("active"):
             return None
-        if not db.verify_password(user["username"], password):
+        if db.login_status(user["username"], password) != "ok":
             return None
         return {
             "username":      user["username"],
@@ -81,30 +81,42 @@ def is_public(user: dict | None) -> bool:
     return bool(user and user.get("public"))
 
 
+def is_aggregate_only(user: dict | None) -> bool:
+    """Public visitors and email-link viewers: dashboards and figures only —
+    no child lists, names, phone numbers or operational pages."""
+    return bool(user and (user.get("public") or user.get("view_link")))
+
+
 # ── View-only tokenised links (scoped dashboards, no account needed) ───────────
+# Sent in the monthly report emails. A link opens the dashboards for that
+# catchment only (figures and charts, no child lists — see is_aggregate_only)
+# and expires, so a forwarded or old email stops working.
+
+VIEW_LINK_MAX_AGE = 62 * 24 * 3600     # two months: each report's link outlives the next one
+
 
 def _view_serializer():
     import os
-    from itsdangerous import URLSafeSerializer
+    from itsdangerous import URLSafeTimedSerializer
     secret = os.environ.get("SECRET_KEY", "rsss-change-me!")
-    return URLSafeSerializer(secret, salt="rsss-view-link")
+    return URLSafeTimedSerializer(secret, salt="rsss-view-link")
 
 
 def make_view_token(scope_type: str, scope_value: str) -> str:
-    """Create a signed, tamper-proof token for a view-only scoped dashboard.
-    scope_type ∈ {'hospital', 'district', 'facility'}."""
+    """Signed, tamper-proof, expiring token for a view-only dashboard.
+    scope_type ∈ {'national', 'district', 'hospital', 'facility'}."""
     return _view_serializer().dumps({"t": scope_type, "v": scope_value})
 
 
 def read_view_token(token: str) -> dict | None:
     try:
-        return _view_serializer().loads(token)
-    except Exception:
+        return _view_serializer().loads(token, max_age=VIEW_LINK_MAX_AGE)
+    except Exception:          # bad signature, expired, or malformed
         return None
 
 
 def user_from_view_token(token: str) -> dict | None:
-    """Build a read-only, catchment-scoped session user from a view token."""
+    """Build a read-only, aggregate-only, catchment-scoped session user."""
     data = read_view_token(token)
     if not data:
         return None
@@ -113,8 +125,10 @@ def user_from_view_token(token: str) -> dict | None:
         return None
     user = {"username": f"view:{t}:{v}",
             "full_name": f"{v} (view only)",
-            "readonly": True, "email": ""}
-    if t == "hospital":
+            "readonly": True, "view_link": True, "email": ""}
+    if t == "national":
+        user.update(role="ministry", full_name="National dashboard (view only)")
+    elif t == "hospital":
         user.update(role="hospital", hospital=v)
     elif t == "district":
         user.update(role="district", district=v)

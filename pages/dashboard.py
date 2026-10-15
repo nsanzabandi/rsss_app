@@ -80,13 +80,11 @@ def layout(user: dict) -> html.Div:
     d_start = (visits["immunization_date"].iloc[0].strftime("%Y-%m-%d")     # date-sorted
                if visits is not None and not visits.empty else "2020-01-01")
 
-    # Opens on LAST MONTH (complete) compared with the month before — both
-    # months have (nearly) all their records, so the ▲/▼ are always meaningful.
-    # "This month" (fills in as records arrive), quarters, years, All time: Period.
-    _m0 = pd.Timestamp.today().normalize().replace(day=1)
-    _lm = _m0.to_period("M") - 1
-    _def_start, _def_end = f"{_lm.start_time:%Y-%m-%d}", f"{_lm.end_time:%Y-%m-%d}"
-    _default = {"value": f"{_def_start}|{_def_end}"}
+    # Opens on ALL TIME (first visit in the data → today); the ▲/▼ badges then
+    # compare this year so far with the same dates last year. Months,
+    # quarters and years are one click away in the Period picker.
+    _def_start, _def_end = d_start, d_end
+    _default = {"value": "all"}
     return html.Div([
         # Page title lives in the top bar and sync freshness in the sidebar
         # (components/layout.py), so the page opens straight on the filters.

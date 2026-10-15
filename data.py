@@ -1357,15 +1357,21 @@ def memo_scoped(kind: str, user: dict, province=None, district=None, hospital=No
 
 
 def _prewarm_default_views() -> None:
-    """In the background, compute what the dashboard opens on — last month vs
-    the month before — then Last 3 months and All time, so the first visitor
-    after a (re)load doesn't wait."""
+    """In the background, compute what the dashboard opens on — All time,
+    with this year so far vs the same dates last year for the ▲/▼ — then
+    last month and Last 3 months, so the first visitor after a (re)load
+    doesn't wait."""
     def _work():
         try:
             today = pd.Timestamp.today().normalize()
             ly = today - pd.DateOffset(years=1)
             user = {"role": "public"}
-            # default view: last month, and the month before (▲/▼)
+            memo_summary("child", user); memo_summary("risk", user)        # All time totals
+            for a, b in ((f"{today.year}-01-01", f"{today:%Y-%m-%d}"),
+                         (f"{ly.year}-01-01", f"{ly:%Y-%m-%d}")):
+                memo_summary("child", user, start=a, end=b)
+                memo_summary("risk", user, start=a, end=b)
+            # last month, and the month before (its ▲/▼)
             m0 = today.replace(day=1)
             lm = m0.to_period("M") - 1
             for per in (lm, lm - 1):
@@ -1378,12 +1384,6 @@ def _prewarm_default_views() -> None:
                 b = (m0.to_period("M") - k + 3).to_timestamp() - pd.Timedelta(days=1)
                 memo_summary("child", user, start=f"{a:%Y-%m-%d}", end=f"{b:%Y-%m-%d}")
                 memo_summary("risk", user, start=f"{a:%Y-%m-%d}", end=f"{b:%Y-%m-%d}")
-            memo_summary("child", user); memo_summary("risk", user)        # All time totals
-            # the default view's ▲/▼: this year so far vs the same dates last year
-            for a, b in ((f"{today.year}-01-01", f"{today:%Y-%m-%d}"),
-                         (f"{ly.year}-01-01", f"{ly:%Y-%m-%d}")):
-                memo_summary("child", user, start=a, end=b)
-                memo_summary("risk", user, start=a, end=b)
         except Exception as exc:
             print(f"[data] pre-warm skipped: {exc}")
     threading.Thread(target=_work, daemon=True).start()

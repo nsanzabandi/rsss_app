@@ -279,7 +279,7 @@ def _send_national_overview(
             try:
                 from auth import make_view_token
                 view_link = (f"{app_config.APP_BASE_URL}/view?"
-                             f"token={make_view_token('ministry', 'national')}")
+                             f"token={make_view_token('national', 'Rwanda')}")
             except Exception:
                 view_link = None
 
@@ -700,12 +700,26 @@ def _run_facility_reports(
                     real_to  = contact["facility_email"] if contact else None
                     cname    = (contact.get("contact_name") or f"{name} Team") if contact else f"{name} Team"
                     subject  = f"Facility Stunting Report {month:02d}/{year} — {name}"
+                    link = ""
+                    if app_config.INCLUDE_DASHBOARD_LINK_IN_EMAILS:
+                        try:
+                            from auth import make_view_token
+                            link = ("View your facility's dashboard (no login needed; "
+                                    "the link works for two months):\n"
+                                    f"{app_config.APP_BASE_URL}/view?"
+                                    f"token={make_view_token('facility', name)}\n\n"
+                                    "To see the children to follow up, request a staff "
+                                    "account (approved by RBC):\n"
+                                    f"{app_config.APP_BASE_URL}/register\n\n")
+                        except Exception:
+                            link = ""
                     body = (
                         f"Dear {cname},\n\n"
                         f"Stunting report for {name} — {_MONTHS[month]} {year}.\n\n"
                         f"Total stunted children: {stats.get('total_stunted_children', 0):,}\n"
                         f"District: {district}  |  Hospital: {hospital}\n\n"
                         f"Please ensure follow-up per national protocols.\n\n"
+                        f"{link}"
                         f"Best regards,\nRBC Stunting Surveillance\nTriggered by: {triggered_by}"
                     )
                     try:

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 import warnings
 from pathlib import Path
 
@@ -103,7 +104,100 @@ def do_login():
     if user:
         auth_login(user)
         return redirect("/rsss_app/")
+    from utils.auth_models import UserDatabase
+    status = UserDatabase().login_status(username.lower(), password)
+    if status in ("pending", "rejected"):
+        return redirect(f"/rsss_app/login?{status}=1")
     return redirect("/rsss_app/login?login_error=1")
+
+
+# ── Account requests (self-service sign-up, approved by a ministry admin) ──────
+
+_REG_LIMIT_PER_IP, _REG_LIMIT_TOTAL, _REG_WINDOW = 5, 60, 3600
+_reg_log: list[tuple[float, str]] = []
+
+
+def _register_allowed(ip: str) -> bool:
+    """Soft anti-spam limit: per client and overall, per hour."""
+    import time
+    now = time.time()
+    _reg_log[:] = [(t, i) for t, i in _reg_log if now - t < _REG_WINDOW]
+    if len(_reg_log) >= _REG_LIMIT_TOTAL or sum(i == ip for _, i in _reg_log) >= _REG_LIMIT_PER_IP:
+        return False
+    _reg_log.append((now, ip))
+    return True
+
+
+@server.route("/rsss_app/do-register", methods=["POST"])
+def do_register():
+    import re
+    f = {k: (request.form.get(k) or "").strip() for k in
+         ("full_name", "position", "email", "phone", "role", "district", "hospital",
+          "health_center", "username", "website")}
+    password = request.form.get("password") or ""
+    back = "/rsss_app/register?error="
+    if f["website"]:                       # honeypot filled → a bot; pretend it worked
+        return redirect("/rsss_app/register?sent=1")
+    ip = (request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+          or request.remote_addr or "?")
+    if not _register_allowed(ip):
+        return redirect(back + "busy")
+    username = f["username"].lower()
+    role = f["role"] if f["role"] in ("district", "hospital", "health_center") else ""
+    if not all((f["full_name"], f["position"], f["email"], f["phone"], role, username)):
+        return redirect(back + "fields")
+    if not re.match(r"^[a-z0-9._-]{3,32}$", username):
+        return redirect(back + "username")
+    if len(password) < 8:
+        return redirect(back + "password")
+    if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", f["email"]):
+        return redirect(back + "email")
+    # Same consistency rules as the admin form (pages/settings.py).
+    from pages.settings import _geo_options
+    geo = _geo_options()
+    district, hospital, facility = f["district"] or None, f["hospital"] or None, f["health_center"] or None
+    if role == "district":
+        hospital = facility = None
+    if role == "hospital":
+        facility = None
+    need = {"district": district, "hospital": hospital, "health_center": facility}[role]
+    if not need or (district and geo["district"] and district not in geo["district"]):
+        return redirect(back + "area")
+    if facility and geo["fac_hospital"].get(facility, hospital) != hospital:
+        return redirect(back + "area")
+    if hospital and geo["hosp_district"].get(hospital, district) != district:
+        return redirect(back + "area")
+    from utils.auth_models import UserDatabase
+    if not UserDatabase().request_account(
+            username, password, f["full_name"][:120], f["email"][:120], f["phone"][:40],
+            f["position"][:120], role, district, hospital, facility):
+        return redirect(back + "taken")
+    _notify_approvers(f["full_name"], role, facility or hospital or district)
+    return redirect("/rsss_app/register?sent=1")
+
+
+def _notify_approvers(name: str, role: str, area: str) -> None:
+    """Email ACCOUNT_APPROVER_EMAILS about a new request, in the background so
+    a slow mail server never holds up the applicant's page."""
+    from config.app_config import ACCOUNT_APPROVER_EMAILS, APP_BASE_URL
+    if not ACCOUNT_APPROVER_EMAILS:
+        return
+
+    def _send():
+        try:
+            from core.email_sender import EmailSender
+            sender = EmailSender()
+            if not sender.connect():
+                return
+            body = (f"{name} has requested an RSSS account ({role.replace('_', ' ')}, {area}).\n\n"
+                    f"Review it in Settings → Users & roles:\n{APP_BASE_URL}/settings\n")
+            for to in ACCOUNT_APPROVER_EMAILS:
+                sender.send_email(to_email=to, cc_emails=[], subject="RSSS account request",
+                                  body=body, attachments=[])
+            sender.disconnect()
+        except Exception as exc:
+            print(f"[register] approver notification failed: {exc}")
+    threading.Thread(target=_send, daemon=True).start()
 
 @server.route("/rsss_app/logout")
 def logout_route():
@@ -115,11 +209,14 @@ def logout_route():
 @server.route("/rsss_app/view")
 def view_route():
     """View-only scoped dashboard via a signed token (used in report emails)."""
-    from auth import user_from_view_token, login as auth_login
+    from auth import user_from_view_token, login as auth_login, get_current_user
+    current = get_current_user()
+    if current and not current.get("readonly"):
+        return redirect("/rsss_app/")          # already signed in — don't downgrade to view-only
     token = request.args.get("token", "")
     user = user_from_view_token(token)
     if not user:
-        return redirect("/rsss_app/login?login_error=1")
+        return redirect("/rsss_app/login?link_expired=1")
     auth_login(user)
     return redirect("/rsss_app/")
 
@@ -166,12 +263,18 @@ _PUBLIC_DENY    = ("db-download.", "db-dl-msg.", "rd-download.", "rd-dl-msg.")
 
 @server.before_request
 def _guard_callbacks():
-    if request.path != f"{URL_PREFIX}/_dash-update-component" or session.get("user"):
+    if request.path != f"{URL_PREFIX}/_dash-update-component":
         return None
+    user = session.get("user")
+    if user and not user.get("view_link"):
+        return None
+    # Not signed in, or signed in through an email view link: the same
+    # dashboards-only allow-list (a view link is scoped to its catchment by
+    # role, but must not reach child lists or follow-up search either).
     from config.app_config import PUBLIC_VIEW
     out = str((request.get_json(silent=True) or {}).get("output", ""))
     ids = [i for i in out.replace("...", "\n").replace("..", "").split("\n") if i]
-    allowed = PUBLIC_VIEW and ids and all(
+    allowed = (PUBLIC_VIEW or user) and ids and all(
         i.startswith(_PUBLIC_OUTPUTS) and not i.startswith(_PUBLIC_DENY) for i in ids)
     if not allowed:
         return ("Sign in required", 403)
@@ -186,7 +289,7 @@ _PUBLIC_PATHS = ("/", "/dashboard", "/risk")
 @app.callback(Output("page-content", "children"),
               Input("url", "pathname"), State("url", "search"))
 def route(pathname: str, search: str):
-    from auth import has_min_role, current_user, is_public
+    from auth import has_min_role, current_user, is_aggregate_only
     user = current_user()
     if not user:
         return html.Div()
@@ -198,10 +301,19 @@ def route(pathname: str, search: str):
     readonly = bool(user.get("readonly"))
 
     if path == "/login":
-        from components.layout import login_layout
-        err = "Invalid username or password." if "login_error" in (search or "") else ""
-        return login_layout(err, embedded=True)
-    if is_public(user) and path not in _PUBLIC_PATHS:
+        from urllib.parse import parse_qs
+        from components.layout import login_layout, login_message
+        args = {k: v[0] for k, v in parse_qs((search or "").lstrip("?")).items()}
+        return login_layout(login_message(args), embedded=True)
+    if path == "/register":
+        from urllib.parse import parse_qs
+        from components.layout import register_layout, register_message
+        if not is_aggregate_only(user):
+            return _forbidden("You're already signed in.")
+        args = {k: v[0] for k, v in parse_qs((search or "").lstrip("?")).items()}
+        msg, ok = register_message(args)
+        return register_layout(msg, ok, embedded=True)
+    if is_aggregate_only(user) and path not in _PUBLIC_PATHS:
         return _signin_prompt()
 
     if path in ("/", "/dashboard"):
