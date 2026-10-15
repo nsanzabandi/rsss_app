@@ -3,9 +3,13 @@ config/app_config.py — Application-level constants.
 """
 import os
 
-# Public base URL used to build the view-only dashboard links in emails —
-# including the /rsss_app prefix, e.g. http://197.243.95.46/rsss_app
-APP_BASE_URL = os.environ.get("APP_BASE_URL", "http://localhost:8050/rsss_app").rstrip("/")
+# Public base URL used to build the links in emails, e.g.
+# http://197.243.95.46/rsss_app. The app is served under /rsss_app, so that
+# prefix is added here if the .env value leaves it out (a link to
+# http://host/view instead of http://host/rsss_app/view is a 404).
+APP_BASE_URL = os.environ.get("APP_BASE_URL", "http://localhost:8050").strip().rstrip("/")
+if not APP_BASE_URL.endswith("/rsss_app"):
+    APP_BASE_URL += "/rsss_app"
 
 # Whether report emails include a "view your dashboard" link: the national
 # overview links to the national dashboard, each hospital/facility report to

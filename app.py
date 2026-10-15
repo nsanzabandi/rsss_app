@@ -206,6 +206,12 @@ def logout_route():
     return redirect("/rsss_app/")
 
 
+@server.route("/view")
+def view_route_unprefixed():
+    """Links built before APP_BASE_URL gained its /rsss_app prefix."""
+    return redirect(f"/rsss_app/view?{request.query_string.decode()}")
+
+
 @server.route("/rsss_app/view")
 def view_route():
     """View-only scoped dashboard via a signed token (used in report emails)."""
