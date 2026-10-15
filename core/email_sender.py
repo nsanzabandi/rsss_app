@@ -61,8 +61,8 @@ class EmailSender:
         if not cfg.SMTP_USER or not cfg.SMTP_PASSWORD:
             self.log.error(
                 "SMTP credentials missing — EMAIL_USER / EMAIL_PASSWORD are empty. "
-                "Create a .env file (copy .env.example) with a valid Gmail address "
-                "and 16-character app password, then restart the app."
+                "Set them in .env to the sending account and its Zimbra passcode "
+                "(see deploy/env.production.example), then restart the app."
             )
             self.server = None
             return False
