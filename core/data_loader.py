@@ -152,8 +152,7 @@ class StuntingDataLoader:
         # FULL history (see above) so imputation has surrounding visits to work
         # with, then we narrow down to this month's rows right after.
         try:
-            from core.stunting_calculator import add_computed_stunting
-            full_history = add_computed_stunting(full_history)
+            full_history = self._compute_haz(full_history)
         except Exception as exc:
             self.log.warning(f"HAZ compute skipped ({exc}) — using column.")
 
@@ -200,6 +199,36 @@ class StuntingDataLoader:
 
         # Group by hospital
         return self._group_by_hospital()
+
+    _HAZ_INPUTS = ["tracked_entity_instance", "event_id", "immunization_date",
+                   "date_of_birth", "gender", "height_at_visit_cm", "age_in_months"]
+
+    def _compute_haz(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Add haz_calc / age_months_calc with the dashboard's own calculation
+        (core/fast_build.computed_stunting), so a month's report and its point
+        on the dashboard trend come from identical code. Falls back to the
+        pandas version when Polars or an input column (e.g. DOB on the
+        production backend) is missing."""
+        try:
+            import polars as pl
+            from core.fast_build import computed_stunting
+        except ImportError:
+            computed_stunting = None
+        if computed_stunting is None or not all(c in df.columns for c in self._HAZ_INPUTS):
+            from core.stunting_calculator import add_computed_stunting
+            return add_computed_stunting(df)
+
+        inp = df[self._HAZ_INPUTS].copy()
+        inp["immunization_date"] = pd.to_datetime(inp["immunization_date"], errors="coerce")
+        inp["date_of_birth"]     = pd.to_datetime(inp["date_of_birth"], errors="coerce")
+        inp["_rid"] = np.arange(len(inp))
+        out = (computed_stunting(pl.from_pandas(inp))
+               .select("_rid", "haz_calc", "age_months_calc").to_pandas()
+               .set_index("_rid").reindex(inp["_rid"]))
+        df = df.copy()
+        df["haz_calc"]        = out["haz_calc"].to_numpy()
+        df["age_months_calc"] = out["age_months_calc"].to_numpy()
+        return df
 
     def _normalise(self, df: pd.DataFrame) -> pd.DataFrame:
         str_cols = [

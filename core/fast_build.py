@@ -66,6 +66,12 @@ def computed_stunting(df: pl.DataFrame) -> pl.DataFrame:
     df = df.with_columns(_hraw=pl.col("_h"))
     df = _with_haz(df, "_h", "_z0", lms)
     df = df.with_columns(_h=pl.when(pl.col("_z0").abs() > 6).then(None).otherwise(pl.col("_h")))
+    # A blank duplicate event on the same visit day takes that day's measured
+    # height (see stunting_calculator.add_computed_stunting) before any
+    # interpolation between visits.
+    day = pl.col("immunization_date").cast(pl.Date)
+    df = df.with_columns(_h=pl.col("_h").fill_null(
+        pl.when(day.is_not_null()).then(pl.col("_h").mean().over([TEI, day]))))
     # Order each child's visits by age, then date, then event_id. pandas used
     # (child, age) only, so visits at the same age kept the database's row
     # order and imputed heights — and ~1,400 stunting classifications — could

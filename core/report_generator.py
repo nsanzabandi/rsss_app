@@ -236,6 +236,7 @@ class HospitalReportGenerator:
                     pass
                 pdf.ln(5)
 
+            _chart("Stunting Rate Over Time (last 12 months)", "trend_chart")
             _chart("Immunization Schedule Distribution", "schedule_chart")
             _chart("Gender Distribution",                "gender_chart")
             _chart("Health Facilities Distribution",     "facility_chart")

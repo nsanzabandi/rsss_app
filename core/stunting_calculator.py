@@ -163,7 +163,19 @@ def add_computed_stunting(df: pd.DataFrame, impute: bool = True) -> pd.DataFrame
     # millions of rows where most children have a single visit.
     if impute and col["tei"]:
         tei = col["tei"]
-        out = out.sort_values([tei, "_age_m"])
+        # eTracker often holds two events for the same visit day — one with
+        # the height, one without. The blank one is the same measurement, so
+        # it takes that day's height, not an interpolation between the
+        # child's earlier and later visits (which could flip it to stunted).
+        if col["date"]:
+            day = pd.to_datetime(out[col["date"]], errors="coerce").dt.normalize()
+            same_day = out.groupby([out[tei], day])["_height"].transform("mean")
+            out["_height"] = out["_height"].fillna(same_day)
+        # Stable sort with the same tie-break as core/fast_build.py (age, then
+        # date, then event_id), so the same data always gives the same answer.
+        order = [tei, "_age_m"] + [c for c in (col["date"], "event_id")
+                                   if c and c in out.columns]
+        out = out.sort_values(order, kind="mergesort", na_position="last")
         size  = out.groupby(tei)["_height"].transform("size")
         valid = out.groupby(tei)["_height"].transform("count")   # non-null count
         needs = (size > 1) & (valid > 0) & (valid < size)

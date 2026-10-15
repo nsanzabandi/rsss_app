@@ -533,6 +533,15 @@ def register_callbacks(app) -> None:
         # coverage section → never wait for it (~14s): use it if loaded, else it
         # loads in the background and that section fills in on the next refresh.
         # The other tabs are built entirely from it, so they wait as before.
+        # Trends uses the WHO-computed tables only — the same numbers as the
+        # Overview trend and the monthly reports, not eTracker's own
+        # stunting_status column (which counted ~2× as many children).
+        if tab == "trends":
+            from data import get_monthly_df, get_visits_df
+            monthly, visits = get_monthly_df(), get_visits_df()
+            if monthly is not None and not monthly.empty:
+                monthly = filter_geo(filter_by_user(monthly, user), province, district, hospital)
+            return _trends(monthly, visits, user, province, district, hospital, start, end)
         if tab == "overview":
             from data import get_df_if_ready
             df = get_df_if_ready()
@@ -568,7 +577,6 @@ def register_callbacks(app) -> None:
             return _overview(df, child, monthly, schedule, start, end)
 
         dispatch = {
-            "trends":      _trends,
             "demo":        _demo,
             "immuno":      _immuno,
             "wasting":     _wasting,
@@ -865,42 +873,109 @@ def _overview(df: pd.DataFrame, child=None, monthly=None, schedule=None,
     ])
 
 
-def _trends(df: pd.DataFrame) -> html.Div:
-    fig_m = fig_q = fig_s = _empty()
+_quarter_memo: dict = {}
 
-    if "immunization_date" in df.columns and df["immunization_date"].notna().any():
-        dd = df[df["immunization_date"].notna()].copy()
-        dd["ym"] = dd["immunization_date"].dt.to_period("M").astype(str)
-        m = dd.groupby("ym")[TEI].nunique().reset_index()
-        m.columns = ["Period", "Children"]
-        fig_m = px.line(m, x="Period", y="Children", markers=True,
-                        title="Monthly Cases", color_discrete_sequence=[_RED])
-        fig_m.update_layout(**_base(height=_H))
-        fig_m.update_yaxes(tickformat=",d")
-        fig_m.update_traces(hovertemplate="%{x}<br>%{y:,} children<extra></extra>")
 
-        dd["q"] = dd["immunization_date"].dt.to_period("Q").astype(str)
-        q = dd.groupby("q")[TEI].nunique().reset_index()
-        q.columns = ["Quarter", "Children"]
-        fig_q = px.bar(q, x="Quarter", y="Children", text="Children",
-                       title="Quarterly Cases", color_discrete_sequence=["#2980B9"])
-        fig_q.update_layout(**_base(height=_H))
-        fig_q.update_yaxes(tickformat=",d")
-        fig_q.update_traces(texttemplate="%{y:,}", textposition="outside",
-                            hovertemplate="%{x}<br>%{y:,} children<extra></extra>")
+def _quarterly(visits, user, province, district, hospital, start, end) -> pd.DataFrame:
+    """Stunted / assessed children per quarter — each child once per quarter,
+    at their latest assessed visit in it (the monthly reports' rule, applied
+    to a quarter). Remembered per data version + view; it's a pass over
+    millions of visit rows."""
+    from data import _child_cache
+    role = user.get("role")
+    key = (_child_cache.get("ts"), role, user.get(role), province, district, hospital, start, end)
+    if key in _quarter_memo:
+        return _quarter_memo[key]
+    v = filter_geo(filter_by_user(visits, user), province, district, hospital)
+    v = v[v["immunization_date"] <= pd.Timestamp.today().normalize()]
+    if start:
+        v = v[v["immunization_date"] >= pd.Timestamp(start)]
+    if end:
+        v = v[v["immunization_date"] <= pd.Timestamp(end)]
+    q = pd.DataFrame(columns=["quarter", "assessed", "stunted", "rate"])
+    if not v.empty:
+        v = v[[TEI, "immunization_date", "is_stunted"]].assign(
+            quarter=v["immunization_date"].dt.to_period("Q"))
+        v = v.drop_duplicates(subset=[TEI, "quarter"], keep="last")   # visits are date-sorted
+        q = (v.groupby("quarter").agg(assessed=(TEI, "size"), stunted=("is_stunted", "sum"))
+              .reset_index())
+        q = q[q["assessed"] >= 30]
+        q["rate"] = (q["stunted"] / q["assessed"] * 100).round(1)
+        q["quarter"] = q["quarter"].astype(str)
+    if len(_quarter_memo) > 50:
+        _quarter_memo.clear()
+    _quarter_memo[key] = q
+    return q
 
-        MN = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
-        dd["mo"] = dd["immunization_date"].dt.month
-        s = dd.groupby("mo")[TEI].nunique().reset_index()
-        s["Month"] = s["mo"].apply(lambda x: MN[x - 1])
-        fig_s = px.bar(s, x="Month", y=TEI, title="Seasonal Pattern",
-                       color=TEI, color_continuous_scale=["#FADBD8", _RED],
-                       labels={TEI: "Children"})
-        fig_s.update_layout(**_base(height=_H, coloraxis_showscale=False))
-        fig_s.update_yaxes(tickformat=",d")
-        fig_s.update_traces(hovertemplate="%{x}<br>%{y:,} children<extra></extra>")
 
+def _trends(monthly, visits, user, province, district, hospital, start, end) -> html.Div:
+    """Stunted children over time, WHO-computed — the same per-month numbers
+    the Overview trend and the monthly hospital/national reports use."""
+    building = "Waiting for the computation"
+    have_month = monthly is not None and not monthly.empty
+    fig_m = _empty(building if not have_month else "No data for this period")
+    fig_q = _empty(building if visits is None else "No data for this period")
+    fig_s = _empty(building if not have_month else "No data for this period")
+
+    if have_month:
+        m = _month_rate(monthly, start, end, "rate")
+        if not m.empty:
+            fig_m = go.Figure()
+            fig_m.add_bar(x=m["month"], y=m["stunted"], name="Stunted children",
+                          marker_color="#E6B0AA",
+                          customdata=m[["measured", "y"]].to_numpy(),
+                          hovertemplate=("%{x|%b %Y}<br>%{y:,} stunted of %{customdata[0]:,} assessed"
+                                         "<br>rate %{customdata[1]:.1f}%<extra></extra>"))
+            fig_m.add_scatter(x=m["month"], y=m["y"], name="Stunting rate %", yaxis="y2",
+                              mode="lines+markers+text", text=m["y"],
+                              texttemplate="%{text:.1f}%", textposition="top center",
+                              textfont=dict(size=10, color="#7B241C"),
+                              line=dict(color=_RED, width=2), cliponaxis=False,
+                              hovertemplate="%{x|%b %Y}<br>%{y:.1f}%<extra></extra>")
+            fig_m.update_layout(**_base(height=_H), title="Stunted Children per Month (WHO computed)",
+                                legend=dict(orientation="h", y=-0.15),
+                                yaxis=dict(title="Stunted children", tickformat=",d"),
+                                yaxis2=dict(title="Stunting %", overlaying="y", side="right",
+                                            rangemode="tozero", showgrid=False,
+                                            range=[0, max(float(m["y"].max()) * 1.3, 5)]))
+
+            # Seasonal pattern: rate by calendar month across all years in view
+            # (a rate, not a count — counts mostly track how much data was entered).
+            MN = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+            s = (m.assign(mo=m["month"].dt.month).groupby("mo")
+                  .agg(measured=("measured", "sum"), stunted=("stunted", "sum")).reset_index())
+            s["rate"] = (s["stunted"] / s["measured"] * 100).round(1)
+            s["Month"] = s["mo"].apply(lambda x: MN[x - 1])
+            fig_s = px.bar(s, x="Month", y="rate", text="rate", title="Seasonal Pattern — Stunting Rate %",
+                           color="rate", color_continuous_scale=["#FADBD8", _RED],
+                           category_orders={"Month": MN},
+                           hover_data={"stunted": ":,", "measured": ":,", "mo": False})
+            fig_s.update_layout(**_base(height=_H, coloraxis_showscale=False,
+                                        yaxis_title="Stunting %", xaxis_title=""))
+            fig_s.update_traces(texttemplate="%{text:.1f}%", textposition="outside", cliponaxis=False)
+            fig_s.update_yaxes(range=[0, max(float(s["rate"].max()) * 1.25, 5)])
+
+    if visits is not None and not visits.empty:
+        q = _quarterly(visits, user, province, district, hospital, start, end)
+        if not q.empty:
+            fig_q = px.bar(q, x="quarter", y="stunted", text="stunted",
+                           title="Stunted Children per Quarter (WHO computed)",
+                           color_discrete_sequence=["#2980B9"],
+                           custom_data=["assessed", "rate"])
+            fig_q.update_layout(**_base(height=_H, xaxis_title="", yaxis_title="Stunted children"))
+            fig_q.update_yaxes(tickformat=",d")
+            fig_q.update_traces(texttemplate="%{y:,}", textposition="outside", cliponaxis=False,
+                                hovertemplate=("%{x}<br>%{y:,} stunted of %{customdata[0]:,} assessed"
+                                               "<br>rate %{customdata[1]:.1f}%<extra></extra>"))
+
+    note = html.Div(
+        [html.I(className="bi bi-info-circle me-1"),
+         "WHO height-for-age (HAZ < −2) at each child's latest assessed visit in the month or "
+         "quarter — the same method as the Overview trend and the monthly reports."],
+        className="text-muted mb-2", style={"fontSize": "0.8rem"})
     return html.Div([
+        note,
         _card(fig_m),
         dbc.Row([dbc.Col(_card(fig_q), md=6), dbc.Col(_card(fig_s), md=6)], className="g-3"),
     ])

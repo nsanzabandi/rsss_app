@@ -1019,7 +1019,8 @@ def warm_child_level() -> None:
 # those children's full histories and merge them into the cached tables.
 
 _FULL_REBUILD_SHARE = 0.4    # if this share of children changed, a full rebuild is cheaper
-_CACHE_FORMAT       = 5      # bump when the cached tables' shape changes → forces one full rebuild
+_CACHE_FORMAT       = 6      # bump when the cached tables' shape changes → forces one full rebuild
+                             # (6: same-day duplicate events share that day's height)
                              # (5: child sex, for the dashboard's boys/girls split)
                              # (4: per-visit growth-risk table for the at-risk dashboard)
                              # (3: health_facility added so health-centre scoping works)
@@ -1182,7 +1183,8 @@ def refresh_after_sync() -> None:
     threading.Thread(target=_worker, daemon=True).start()
 
 
-def monthly_rate(monthly: pd.DataFrame, start=None, end=None, value: str = "rate") -> pd.DataFrame:
+def monthly_rate(monthly: pd.DataFrame, start=None, end=None, value: str = "rate",
+                 min_measured: int = 100) -> pd.DataFrame:
     """Collapse the monthly×geo table (get_monthly_df()) to a national-or-
     already-geo-filtered monthly series, dropping future and thin
     (low-denominator) months that make the line spike. Shared by the
@@ -1191,6 +1193,8 @@ def monthly_rate(monthly: pd.DataFrame, start=None, end=None, value: str = "rate
 
     value="rate"   → % of measured children who are stunted
     value="severe" → % of stunted children who are severely stunted
+    min_measured: floor for dropping thin months — 100 suits national or
+    district views; a single hospital/facility report passes a smaller one.
     """
     m = (monthly.groupby("month")
                 .agg(measured=("measured", "sum"),
@@ -1216,7 +1220,7 @@ def monthly_rate(monthly: pd.DataFrame, start=None, end=None, value: str = "rate
             narrow = False
     if not narrow:
         busy = m["measured"].quantile(0.75)
-        thresh = max(100, 0.30 * busy)
+        thresh = max(min_measured, 0.30 * busy)
         m = m[m["measured"] >= thresh].copy()
     if value == "rate":
         m["y"] = (m["stunted"] / m["measured"] * 100).round(1)

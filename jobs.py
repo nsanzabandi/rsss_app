@@ -72,6 +72,47 @@ def _norm_name(s: str) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 
+def _trend_points(monthly, year: int, month: int, stunted: int, assessed: int,
+                  col: str | None = None, name: str | None = None,
+                  months: int | None = 12, min_measured: int = 100) -> dict:
+    """{"Oct 2025": 12.4, …} — the stunting rate for the `months` months up to
+    and including the report month (months=None: all history), for the whole country (col=None) or one
+    hospital/facility (col="district_hospital"/"health_facility", name=…).
+
+    Earlier months come from the dashboard's monthly table (data.monthly_rate,
+    the same numbers as its Stunting Rate Over Time chart). The report month
+    itself is this run's own figure, so the chart's last point always equals
+    the percentage printed in the report. Months after the report month are
+    left out — a September report run in mid-October doesn't show October."""
+    import pandas as pd
+    import data as _data
+    end = pd.Timestamp(year=year, month=month, day=1)
+    start = (end.to_period("M") - (months - 1)).to_timestamp() if months else None
+    pts = {}
+    if monthly is not None and not monthly.empty:
+        m = monthly
+        if col:
+            m = m[m[col] == name] if col in m.columns else m.iloc[0:0]
+        if not m.empty:
+            r = _data.monthly_rate(m, start, end - pd.Timedelta(days=1),
+                                   min_measured=min_measured)
+            pts = dict(zip(r["month"], r["y"]))
+    if assessed:
+        pts[end] = round(stunted / assessed * 100, 1)
+    return {ts.strftime("%b %Y"): y for ts, y in sorted(pts.items())}
+
+
+def _monthly_for_trends(log):
+    """The dashboard's monthly table for report trend charts, or None (the
+    reports then go out without a trend chart rather than failing)."""
+    try:
+        import data as _data
+        return _data.get_monthly_df_stale_ok()
+    except Exception as exc:
+        log.warning(f"Trend chart data unavailable: {exc}")
+        return None
+
+
 def new_job(kind: str, params: dict) -> str:
     jid = str(uuid.uuid4())
     with _lock:
@@ -190,24 +231,10 @@ def _send_national_overview(
         stats = dict(total_stunted_children=total, avg_age_months=avg_age,
                     age_distribution=age_dist)
 
-        # Same underlying numbers as the dashboard's own "Stunting Rate Over
-        # Time" chart (data.monthly_rate over data.get_monthly_df()), so the
-        # PDF and the live dashboard always tell the same story.
-        trend_flat = {}
-        try:
-            import data as _data
-            monthly = _data.get_monthly_df_stale_ok()
-            if monthly is not None and not monthly.empty:
-                m = _data.monthly_rate(monthly)
-                trend_flat = dict(zip(m["month"], m["y"]))
-        except Exception as exc:
-            log.warning(f"Trend chart data unavailable: {exc}")
-        # The report month's point comes from THIS run's numbers, not the
-        # (up to a few hours old) dashboard cache, so the chart's last point
-        # always equals the summary percentage printed above it.
-        if total_assessed:
-            trend_flat[pd.Timestamp(year=year, month=month, day=1)] = round(total / total_assessed * 100, 1)
-        trend_flat = {ts.strftime("%b %Y"): y for ts, y in sorted(trend_flat.items())}
+        # Same numbers as the dashboard's "Stunting Rate Over Time" chart, with
+        # the report month's point taken from this run (see _trend_points).
+        monthly = _monthly_for_trends(log)
+        trend_flat = _trend_points(monthly, year, month, total, total_assessed, months=None)
 
         # At-risk (growth-velocity) — reuse if the caller already computed it
         # for the hospital reports in this same run, else compute fresh.
@@ -340,6 +367,7 @@ def _run_hospital_reports(
 
         vacc_counts   = loader.get_vaccinated_counts_by_hospital()
         assessed_counts = loader.get_assessed_counts_by("district_hospital")
+        monthly = _monthly_for_trends(log)
         contacts_path = BASE_DIR / "config" / "hospital_emails.json"
         contacts: dict = {}
         if contacts_path.exists():
@@ -404,6 +432,14 @@ def _run_hospital_reports(
                 chart_gen.create_gender_pie_chart(stats.get("gender_distribution", {}), gc)
                 chart_gen.create_schedule_bar_chart(stats.get("schedule_breakdown", {}), sc)
                 charts = {"gender_chart": gc, "schedule_chart": sc}
+
+                trend = _trend_points(monthly, year, month,
+                                      stats.get("total_stunted_children", 0),
+                                      assessed_counts.get(name, 0),
+                                      col="district_hospital", name=name, min_measured=30)
+                tc = str(reports_dir / f"{safe}_trend.png")
+                if len(trend) >= 2 and chart_gen.create_stunting_trend_chart(trend, tc):
+                    charts["trend_chart"] = tc
 
                 fd = stats.get("facility_distribution", {})
                 if len(fd) > 1:
@@ -579,6 +615,7 @@ def _run_facility_reports(
 
         vacc_counts   = loader.get_vaccinated_counts_by_facility()
         assessed_counts = loader.get_assessed_counts_by("health_facility")
+        monthly = _monthly_for_trends(log)
         contacts_path = BASE_DIR / "config" / "health_facility_emails.json"
         contacts: dict = {}
         if contacts_path.exists():
@@ -626,6 +663,14 @@ def _run_facility_reports(
                 chart_gen.create_gender_pie_chart(stats.get("gender_distribution", {}), gc)
                 chart_gen.create_schedule_bar_chart(stats.get("schedule_breakdown", {}), sc)
                 charts = {"gender_chart": gc, "schedule_chart": sc}
+
+                trend = _trend_points(monthly, year, month,
+                                      stats.get("total_stunted_children", 0),
+                                      assessed_counts.get(name, 0),
+                                      col="health_facility", name=name, min_measured=10)
+                tc = str(reports_dir / f"fac_{safe}_trend.png")
+                if len(trend) >= 2 and chart_gen.create_stunting_trend_chart(trend, tc):
+                    charts["trend_chart"] = tc
 
                 total_vacc = vacc_counts.get(name, 0)
                 pdf   = str(reports_dir / f"Fac_{safe}_Report.pdf")
