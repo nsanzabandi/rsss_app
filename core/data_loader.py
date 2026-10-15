@@ -76,9 +76,10 @@ class StuntingDataLoader:
                 {s['imm_date']}  AS immunization_date
         """
         if active() == "local":
+            from tools.match_villages import JOIN_SQL as VILLAGE_JOIN_SQL, VILLAGE_COLS_SQL
             # Extra columns the case-list (Excel) report needs — from the local
             # immunization_vaccination table.
-            extra = """,
+            extra = f""",
                 child_id,
                 child_name,
                 date_of_birth,
@@ -86,10 +87,13 @@ class StuntingDataLoader:
                 father_names, father_phone,
                 residence_province AS province,
                 residence_province, residence_district, residence_sector,
-                village
+                {VILLAGE_COLS_SQL.strip()}
             """
+            # Official village names (tools/match_villages.py) — see core/village_matcher.py.
+            from_sql = f"{s['table']} iv {VILLAGE_JOIN_SQL}"
         else:
             extra = ""
+            from_sql = s["table"]
         # Two-step fetch: WHO HAZ computation (add_computed_stunting, below)
         # imputes a visit's missing/implausible height from that SAME
         # child's OTHER visits — but only if those other visits are present
@@ -113,12 +117,15 @@ class StuntingDataLoader:
         period_end   = date(year + (month == 12), month % 12 + 1, 1)
         sql = f"""
             SELECT {core}{extra}{event_id_col}
-            FROM {s['table']}
+            FROM {from_sql}
             WHERE {s['tei']} = ANY(%(ids)s)
         """
         try:
             conn = self._connect()
             cur  = conn.cursor()
+            if active() == "local":
+                from tools.match_villages import ensure_table
+                ensure_table(cur); conn.commit()
             cur.execute(id_sql, {"start": period_start, "end": period_end})
             child_ids = [r[0] for r in cur.fetchall() if r[0]]
             if not child_ids:

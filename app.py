@@ -496,6 +496,11 @@ def _preload_data() -> None:
             data.warm_child_level()
         except Exception as exc:
             print(f"[startup] data preload failed: {exc}")
+        try:                       # official village names for new addresses (incremental)
+            from tools.match_villages import run as match_villages
+            match_villages(verbose=False)
+        except Exception as exc:
+            print(f"[startup] village matching skipped: {exc}")
     threading.Thread(target=_work, daemon=True).start()
 
 

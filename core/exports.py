@@ -36,6 +36,7 @@ LISTS = {
 }
 
 _DIST = "COALESCE(h_district, residence_district, district_source)"
+from tools.match_villages import JOIN_SQL as VILLAGE_JOIN_SQL, VILLAGE_COLS_SQL
 
 # DB columns pulled for every list (latest relevant visit per child)
 _DETAIL_SQL = f"""
@@ -49,9 +50,13 @@ SELECT entity_id                AS tracked_entity_instance,
        residence_province       AS province,
        {_DIST}                  AS district,
        h_district_hospital      AS district_hospital,
-       health_facility, h_sector AS sector, village,
+       health_facility, h_sector AS sector,
+       -- home village: the official name when the recorded text matched one
+       -- (tools/match_villages.py), else the text as recorded
+       {VILLAGE_COLS_SQL},
        mother_names, mother_phone, father_names, father_phone
-FROM immunization_vaccination
+FROM immunization_vaccination iv
+{VILLAGE_JOIN_SQL}
 """
 
 # (column, header) — order of columns in the downloaded sheet
@@ -64,7 +69,8 @@ _COLUMNS = [
     ("muac_cm", "MUAC (cm)"), ("weight_velocity", "Weight change (kg/month)"),
     ("immunization_schedule", "Schedule"),
     ("province", "Province"), ("district", "District"), ("district_hospital", "Hospital"),
-    ("health_facility", "Health facility"), ("sector", "Sector"), ("village", "Village"),
+    ("health_facility", "Health facility"), ("sector", "Sector"),
+    ("cell", "Home cell"), ("village", "Home village"), ("village_check", "Village check"),
     ("mother_names", "Mother"), ("mother_phone", "Mother phone"),
     ("father_names", "Father"), ("father_phone", "Father phone"),
 ]
@@ -114,6 +120,12 @@ def _scoped_children(user, province, district, hospital, start, end) -> pd.DataF
     return data.scoped_child_df(child, visits, user, province, district, hospital, start, end)
 
 
+def _ensure_village_table(cur) -> None:
+    """The join target exists even before the first village match has run."""
+    from tools.match_villages import ensure_table
+    ensure_table(cur)
+
+
 def _details(ids: list, start=None, end=None) -> pd.DataFrame:
     """Latest visit (within the date window) per child, with contact details."""
     from config.db_local import get_local_conn
@@ -125,6 +137,7 @@ def _details(ids: list, start=None, end=None) -> pd.DataFrame:
     if end:
         sql += " AND last_immunization_date <= %s"; params.append(end)
     conn = get_local_conn(); cur = conn.cursor()
+    _ensure_village_table(cur); conn.commit()
     cur.execute(sql, params)
     cols = [d[0] for d in cur.description]
     df = pd.DataFrame(cur.fetchall(), columns=cols)
@@ -213,6 +226,7 @@ def _missed(user, province, district, hospital, start, end, **_) -> pd.DataFrame
            "WHERE next_visit_date BETWEEN %s AND %s")
     params += [today - timedelta(days=MISSED_LOOKBACK), today - timedelta(days=MISSED_DAYS)]
     conn = get_local_conn(); cur = conn.cursor()
+    _ensure_village_table(cur); conn.commit()
     cur.execute(sql, params)
     cols = [d[0] for d in cur.description]
     df = pd.DataFrame(cur.fetchall(), columns=cols)

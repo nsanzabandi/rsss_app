@@ -1165,6 +1165,12 @@ def refresh_after_sync() -> None:
             with _child_lock:
                 _child_state["status"] = "error"
             print(f"[data] post-sync cache update failed: {exc}")
+        # Official village names for any newly recorded addresses (seconds).
+        try:
+            from tools.match_villages import run as match_villages
+            match_villages(verbose=False)
+        except Exception as exc:
+            print(f"[data] village matching skipped: {exc}")
         # Stunted-by-column rows (Risk/Reports pages): load a fresh copy
         # outside the lock, then swap. get_all_df() is deliberately NOT
         # pre-loaded — no page calls it, and it would pin ~0.5–2 GB for nothing.
