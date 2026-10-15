@@ -207,18 +207,20 @@ def logout_route():
 
 
 @server.route("/view")
-def view_route_unprefixed():
+@server.route("/register")
+@server.route("/login")
+def unprefixed_redirect():
     """Links built before APP_BASE_URL gained its /rsss_app prefix."""
-    return redirect(f"/rsss_app/view?{request.query_string.decode()}")
+    qs = request.query_string.decode()
+    return redirect(f"/rsss_app{request.path}" + (f"?{qs}" if qs else ""))
 
 
 @server.route("/rsss_app/view")
 def view_route():
     """View-only scoped dashboard via a signed token (used in report emails)."""
-    from auth import user_from_view_token, login as auth_login, get_current_user
-    current = get_current_user()
-    if current and not current.get("readonly"):
-        return redirect("/rsss_app/")          # already signed in — don't downgrade to view-only
+    # The link always opens the catchment it was sent for — even in a browser
+    # already signed in (that session is replaced; the user can sign in again).
+    from auth import user_from_view_token, login as auth_login
     token = request.args.get("token", "")
     user = user_from_view_token(token)
     if not user:
@@ -314,11 +316,15 @@ def route(pathname: str, search: str):
     if path == "/register":
         from urllib.parse import parse_qs
         from components.layout import register_layout, register_message
-        if not is_aggregate_only(user):
-            return _forbidden("You're already signed in.")
         args = {k: v[0] for k, v in parse_qs((search or "").lstrip("?")).items()}
         msg, ok = register_message(args)
-        return register_layout(msg, ok, embedded=True)
+        page = register_layout(msg, ok, embedded=True)
+        if not is_aggregate_only(user):
+            note = dbc.Alert(f"You're signed in as {user.get('full_name') or user.get('username')}. "
+                             "This form requests a separate account for someone else.",
+                             color="info", className="py-2 mb-0 mt-3 mx-3")
+            return html.Div([note, page])
+        return page
     if is_aggregate_only(user) and path not in _PUBLIC_PATHS:
         return _signin_prompt()
 
