@@ -66,9 +66,13 @@ DISTRICTS: dict[str, str] = {
     "ARCA1tta4rF": "Nyabihu",    "M6o8DrKq6P3": "Rusizi",
 }
 
-# Data element / attribute UIDs from eTracker
+# Data element / attribute UIDs from eTracker. The org unit is NOT listed here:
+# each request adds its own district as the ou dimension (_fetch_district).
+# This list used to start with "ou:Hjw70Lodtf2" (all of Rwanda), which
+# overrode the per-district ou filter — every one of the 30 district requests
+# downloaded the whole country, and one cut-short national download left
+# June 2025 half-loaded.
 DIMENSIONS = [
-    "ou:Hjw70Lodtf2",
     "jKahvk7wiQf", "e9BrRZAicPE", "sah5bll9Y6Q", "A31FfrjPqyp",
     "Rq4qM2wKYFL", "iCy9QPG9HY9", "QyhGvFhiMF3", "cM7Q2YcXhH0",
     "yXIS60L4z9a", "RzPmWr82V3p", "IBcgUcOzYgB", "cUTcjBma2jK",
@@ -607,8 +611,7 @@ def _fetch_district(
                     f"{BASE_URL}/api/analytics/events/query/{PROGRAMME_ID}",
                     params={
                         "stage":      STAGE_ID,
-                        "dimension":  DIMENSIONS,
-                        "filter":     f"ou:{district_id}",
+                        "dimension":  DIMENSIONS + [f"ou:{district_id}"],
                         "startDate":  chunk_start,
                         "endDate":    chunk_end,
                         "pageSize":   1000,
