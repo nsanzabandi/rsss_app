@@ -94,17 +94,13 @@ class StuntingDataLoader:
         else:
             extra = ""
             from_sql = s["table"]
-        # Two-step fetch: WHO HAZ computation (add_computed_stunting, below)
-        # imputes a visit's missing/implausible height from that SAME
-        # child's OTHER visits — but only if those other visits are present
-        # in the batch it's given. Fetching only this month's rows starves
-        # it of that context: a child whose only July row has a null/outlier
-        # height would get an uncomputable HAZ and silently vanish from the
-        # stunted count, even though the dashboard (which always loads full
-        # history before scoping to a period) can impute it fine. So: first
-        # find which children had any visit this month, then fetch each of
-        # THEIR full visit history, compute HAZ with full context, and only
-        # then narrow down to this month's (latest) visit per child.
+        # Two-step fetch: first find which children had any visit this month,
+        # then fetch each of THEIR full visit history, compute HAZ exactly as
+        # the dashboard does (which also loads full history before scoping to
+        # a period), and only then narrow down to this month's (latest
+        # measured) visit per child. HAZ only uses heights measured on the
+        # visit day, so the history no longer changes a visit's z-score, but
+        # the "ever stunted" flag still needs it.
         id_sql = f"""
             SELECT DISTINCT {s['tei']}
             FROM {s['table']}

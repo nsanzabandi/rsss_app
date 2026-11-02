@@ -14,11 +14,10 @@ Outputs are pandas DataFrames, so the dashboards are unchanged. data.py falls
 back to the original pandas build if Polars is unavailable.
 
 Intentional difference — determinism: the pandas code depended on the order
-rows came back from the database in two places (visits at the same age during
-height imputation; same-date visits in the growth-velocity step), so the same
-data could give slightly different results run to run (verified: shuffling
-the rows flipped ~1,400 stunting classifications). Here every tie is broken
-by date, then event_id — the same data always gives the same answer.
+rows came back from the database for same-date visits in the growth-velocity
+step, so the same data could give slightly different results run to run. Here
+every tie is broken by date, then event_id — the same data always gives the
+same answer.
 """
 from __future__ import annotations
 
@@ -42,18 +41,29 @@ def _lms() -> pl.DataFrame:
 
 
 def _with_haz(df: pl.DataFrame, hcol: str, out: str, lms: pl.DataFrame) -> pl.DataFrame:
-    """WHO LMS z-score: ((h / M) ** L - 1) / (L · S), age rounded and clipped to 0–60."""
-    j = (df.with_columns(_am=pl.col("_age_m").round(0).clip(0, 60))
-           .join(lms, left_on=["_sex", "_am"], right_on=["sex", "age_month"], how="left"))
+    """WHO LMS z-score: ((h / M) ** L - 1) / (L · S), with L, M, S at the exact
+    age (clipped to 0–60): linear between the two monthly rows around it, as
+    stunting_calculator.haz() does."""
+    a = pl.col("_age_m").clip(0, 60)
+    lo = lms.rename({"L": "_L0", "M": "_M0", "S": "_S0"})
+    hi = lms.rename({"L": "_L1", "M": "_M1", "S": "_S1"})
+    j = (df.with_columns(_a0=a.floor(), _a1=(a.floor() + 1).clip(0, 60), _af=a - a.floor())
+           .join(lo, left_on=["_sex", "_a0"], right_on=["sex", "age_month"], how="left")
+           .join(hi, left_on=["_sex", "_a1"], right_on=["sex", "age_month"], how="left"))
+    f = pl.col("_af")
+    L = pl.col("_L0") + (pl.col("_L1") - pl.col("_L0")) * f
+    M = pl.col("_M0") + (pl.col("_M1") - pl.col("_M0")) * f
+    S = pl.col("_S0") + (pl.col("_S1") - pl.col("_S0")) * f
     return j.with_columns(
-        (((pl.col(hcol) / pl.col("M")) ** pl.col("L") - 1) / (pl.col("L") * pl.col("S"))).alias(out)
-    ).drop(["L", "M", "S", "_am"])
+        (((pl.col(hcol) / M) ** L - 1) / (L * S)).alias(out)
+    ).drop(["_L0", "_M0", "_S0", "_L1", "_M1", "_S1", "_a0", "_a1", "_af"])
 
 
 def computed_stunting(df: pl.DataFrame) -> pl.DataFrame:
     """add_computed_stunting(): age (DOB + visit, else recorded), sex code,
-    plausible height, first-pass HAZ (|z|>6 → outlier), per-child imputation
-    ordered by age (interior linear, edges nearest), final haz_calc."""
+    plausible height, first-pass HAZ (|z|>6 → outlier), a blank same-day
+    duplicate takes that day's height, final haz_calc. Heights are never
+    borrowed from other visit days."""
     lms = _lms()
     sexs = pl.col("gender").cast(pl.Utf8).str.strip_chars().str.to_lowercase()
     age = (pl.col("immunization_date").cast(pl.Date) - pl.col("date_of_birth").cast(pl.Date)).dt.total_days() / 30.4375
@@ -67,17 +77,12 @@ def computed_stunting(df: pl.DataFrame) -> pl.DataFrame:
     df = _with_haz(df, "_h", "_z0", lms)
     df = df.with_columns(_h=pl.when(pl.col("_z0").abs() > 6).then(None).otherwise(pl.col("_h")))
     # A blank duplicate event on the same visit day takes that day's measured
-    # height (see stunting_calculator.add_computed_stunting) before any
-    # interpolation between visits.
+    # height (see stunting_calculator.add_computed_stunting). Nothing is taken
+    # from other days: carrying an older height forward to an older age made
+    # ~2,300 children a month look stunted (65% of them were "stunted").
     day = pl.col("immunization_date").cast(pl.Date)
     df = df.with_columns(_h=pl.col("_h").fill_null(
         pl.when(day.is_not_null()).then(pl.col("_h").mean().over([TEI, day]))))
-    # Order each child's visits by age, then date, then event_id. pandas used
-    # (child, age) only, so visits at the same age kept the database's row
-    # order and imputed heights — and ~1,400 stunting classifications — could
-    # change between runs. With the full tie-break the result is deterministic.
-    df = (df.sort([TEI, "_age_m", "immunization_date", "event_id"], nulls_last=True)
-            .with_columns(_h=pl.col("_h").interpolate().forward_fill().backward_fill().over(TEI)))
     df = _with_haz(df, "_h", "haz_calc", lms)
     return df.rename({"_age_m": "age_months_calc"}).drop(["_z0", "_hraw", "_h"])
 

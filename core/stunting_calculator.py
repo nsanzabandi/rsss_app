@@ -7,15 +7,18 @@ Method (WHO Child Growth Standards, height/length-for-age):
     recorded age column when DOB or visit date is missing]
   • HAZ (height-for-age z-score) via the WHO LMS method:
         Z = ((height / M) ** L − 1) / (L · S)
-    with sex- and age-specific L, M, S from config/who_hfa_lms.csv (0–60 months).
+    with sex-specific L, M, S from config/who_hfa_lms.csv (0–60 months), taken
+    at the exact age (linear between months), as WHO Anthro does.
   • Classification (per visit):
         HAZ < −3  → Severe stunting
         −3 ≤ HAZ < −2 → Moderate stunting
         HAZ ≥ −2  → Normal
-  • Outliers/missing heights are imputed from the SAME child's other visits,
-    interpolated by age (entity_id keyed). Biologically implausible heights and
-    |HAZ| > 6 are treated as errors and re-imputed; if a child has no usable
-    measurement at all, that visit stays unclassified.
+  • Only a height measured at that visit counts. Biologically implausible
+    heights and |HAZ| > 6 are treated as errors (not measured). A blank
+    duplicate event on the same day takes that day's measured height; heights
+    are never borrowed from the child's other visit days — an older height at
+    an older age made the child look stunted. A visit with no usable height
+    stays unclassified.
 
 Child-level status = the most recent VALID visit (current status). An
 `ever_stunted` flag is also produced for comparison.
@@ -85,38 +88,26 @@ def _load_lms() -> pd.DataFrame:
 
 def haz(height_cm, age_months, sex_code) -> np.ndarray:
     """Vectorized height-for-age z-score. Inputs are array-like, positionally
-    aligned. Returns np.ndarray of HAZ (NaN where inputs are unusable)."""
+    aligned. Returns np.ndarray of HAZ (NaN where inputs are unusable).
+
+    L, M, S are taken at the child's EXACT age (linear between the monthly
+    table rows), as WHO Anthro does with its daily tables. Rounding the age
+    to a whole month moved young babies onto the wrong reference — a
+    3-week-old measured against the 1-month median looked stunted."""
     lms = _load_lms()
-    age_round = np.clip(np.round(pd.to_numeric(pd.Series(age_months), errors="coerce")),
-                        0, 60)
-    key = pd.DataFrame({
-        "sex":       pd.to_numeric(pd.Series(sex_code), errors="coerce").values,
-        "age_month": age_round.values,
-    })
-    merged = key.merge(lms, on=["sex", "age_month"], how="left")
-    M = merged["M"].to_numpy(dtype=float)
-    S = merged["S"].to_numpy(dtype=float)
-    L = merged["L"].to_numpy(dtype=float)
+    age = np.clip(pd.to_numeric(pd.Series(age_months), errors="coerce").to_numpy(dtype=float),
+                  0, 60)
+    sex = pd.to_numeric(pd.Series(sex_code), errors="coerce").to_numpy(dtype=float)
+    L = np.full(len(age), np.nan); M = L.copy(); S = L.copy()
+    for s in (1, 2):
+        t = lms[lms["sex"] == s].sort_values("age_month")
+        k = (sex == s) & ~np.isnan(age)
+        for arr, c in ((L, "L"), (M, "M"), (S, "S")):
+            arr[k] = np.interp(age[k], t["age_month"], t[c])
     x = pd.to_numeric(pd.Series(height_cm), errors="coerce").to_numpy(dtype=float)
     with np.errstate(invalid="ignore", divide="ignore"):
         z = (np.power(x / M, L) - 1.0) / (L * S)
     return z
-
-
-# ── Per-child imputation ────────────────────────────────────────────────────────
-
-def _impute_group(g: pd.DataFrame) -> pd.Series:
-    """Interpolate a single child's missing/outlier heights.
-
-    Rows arrive already sorted by age within the child, so a positional linear
-    interpolation fills gaps in growth order. (Positional avoids the 'NaN in
-    index' problem when a visit has no recorded age.)
-    """
-    s = g["_height"].reset_index(drop=True)
-    if s.notna().sum() == 0:
-        return pd.Series(g["_height"].values, index=g.index)
-    filled = s.interpolate(method="linear", limit_direction="both")
-    return pd.Series(filled.values, index=g.index)
 
 
 # ── Main entry point ─────────────────────────────────────────────────────────────
@@ -128,7 +119,8 @@ def add_computed_stunting(df: pd.DataFrame, impute: bool = True) -> pd.DataFrame
         age_months_calc       float   age used (from DOB when available)
         height_clean_cm       float   height after outlier removal + imputation
         stunting_calc         str     Normal | Moderate stunting | Severe stunting
-        haz_imputed           bool    True if this visit's height was imputed
+        haz_imputed           bool    True if this visit's height came from a
+                                      same-day duplicate event
     """
     col = _resolve(df)
     out = df.copy()
@@ -153,40 +145,18 @@ def add_computed_stunting(df: pd.DataFrame, impute: bool = True) -> pd.DataFrame
     out["_height"] = h
     out["_height_raw"] = h.copy()
 
-    # First-pass HAZ → flag implausible z as outliers to be re-imputed
+    # First-pass HAZ → implausible z is a data-entry error, not a measurement
     z0 = haz(out["_height"], out["_age_m"], out["_sex"])
     out.loc[np.abs(z0) > _HAZ_FLAG, "_height"] = np.nan
 
-    # Impute within each child by age — but only touch children that actually
-    # need it (more than one visit AND at least one missing/outlier height AND
-    # at least one usable height to interpolate from). This keeps it fast on
-    # millions of rows where most children have a single visit.
-    if impute and col["tei"]:
+    # eTracker often holds two events for the same visit day — one with the
+    # height, one without. The blank one is the same measurement, so it takes
+    # that day's height. Nothing is borrowed from other days.
+    if impute and col["tei"] and col["date"]:
         tei = col["tei"]
-        # eTracker often holds two events for the same visit day — one with
-        # the height, one without. The blank one is the same measurement, so
-        # it takes that day's height, not an interpolation between the
-        # child's earlier and later visits (which could flip it to stunted).
-        if col["date"]:
-            day = pd.to_datetime(out[col["date"]], errors="coerce").dt.normalize()
-            same_day = out.groupby([out[tei], day])["_height"].transform("mean")
-            out["_height"] = out["_height"].fillna(same_day)
-        # Stable sort with the same tie-break as core/fast_build.py (age, then
-        # date, then event_id), so the same data always gives the same answer.
-        order = [tei, "_age_m"] + [c for c in (col["date"], "event_id")
-                                   if c and c in out.columns]
-        out = out.sort_values(order, kind="mergesort", na_position="last")
-        size  = out.groupby(tei)["_height"].transform("size")
-        valid = out.groupby(tei)["_height"].transform("count")   # non-null count
-        needs = (size > 1) & (valid > 0) & (valid < size)
-        if needs.any():
-            sub = out[out[tei].isin(out.loc[needs, tei].unique())]
-            try:
-                filled = sub.groupby(tei, group_keys=False).apply(
-                    _impute_group, include_groups=False)
-            except TypeError:   # older pandas without include_groups
-                filled = sub.groupby(tei, group_keys=False).apply(_impute_group)
-            out.loc[filled.index, "_height"] = filled
+        day = pd.to_datetime(out[col["date"]], errors="coerce").dt.normalize()
+        same_day = out.groupby([out[tei], day])["_height"].transform("mean")
+        out["_height"] = out["_height"].fillna(same_day)
 
     out["haz_imputed"]     = out["_height"].notna() & out["_height_raw"].isna()
     out["height_clean_cm"] = out["_height"]

@@ -1019,7 +1019,7 @@ def warm_child_level() -> None:
 # those children's full histories and merge them into the cached tables.
 
 _FULL_REBUILD_SHARE = 0.4    # if this share of children changed, a full rebuild is cheaper
-_CACHE_FORMAT       = 6      # bump when the cached tables' shape changes → forces one full rebuild
+_CACHE_FORMAT       = 7      # bump when the cached tables' shape changes → forces one full rebuild
                              # (6: same-day duplicate events share that day's height)
                              # (5: child sex, for the dashboard's boys/girls split)
                              # (4: per-visit growth-risk table for the at-risk dashboard)
