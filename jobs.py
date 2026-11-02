@@ -152,6 +152,31 @@ def _push_error(jid: str, msg: str) -> None:
 
 # ── National overview (senior/ministry officials) ──────────────────────────────
 
+def _remeasure_note(n: int) -> str:
+    """The facility email's re-measure + method paragraphs (same wording as
+    the hospital email)."""
+    from core.email_sender import METHOD_NOTE, remeasure_lines
+    return "\n".join(remeasure_lines(n) + [METHOD_NOTE, "", ""])
+
+
+def _remeasure_file(area: dict, year: int, month: int, path: Path, log) -> tuple[str | None, int]:
+    """Write the catchment's 'Heights to re-measure' workbook for the report
+    month (core/exports.remeasure_workbook). Returns (path or None, count);
+    a failure only costs the attachment, never the report."""
+    from calendar import monthrange
+    try:
+        from core.exports import remeasure_workbook
+        data, n = remeasure_workbook(area, f"{year:04d}-{month:02d}-01",
+                                     f"{year:04d}-{month:02d}-{monthrange(year, month)[1]:02d}")
+    except Exception as exc:
+        log.warning(f"Re-measure list unavailable for {area}: {exc}")
+        return None, 0
+    if not data:
+        return None, 0
+    path.write_bytes(data)
+    return str(path), n
+
+
 def _send_national_overview(
     jid: str,
     loader,
@@ -163,6 +188,7 @@ def _send_national_overview(
     reports_dir: Path,
     at_risk_df=None,
     hospitals_notified: int = 0,
+    remeasure_total: int = 0,
 ) -> None:
     """
     Build a national-level overview PDF (all districts/hospitals combined) and
@@ -177,6 +203,8 @@ def _send_national_overview(
     hospitals_notified: how many hospitals were also individually emailed in
     this same run — mentioned in the overview email body so recipients know
     the underlying hospitals already have their own catchment-area reports.
+    remeasure_total: children whose height needs re-measuring across the
+    hospitals emailed in this run (each got its own list).
 
     Pushes exactly one aggregate result row into the job via _push_result, so
     it shows up in the existing results table without any UI changes.
@@ -286,7 +314,8 @@ def _send_national_overview(
         body = EmailSender(log).create_overview_email_body(
             month, year, stats, n_hospitals=len(hospital_summary),
             total_vaccinated=total_vaccinated, dashboard_link=view_link,
-            hospitals_notified=hospitals_notified, total_assessed=total_assessed)
+            hospitals_notified=hospitals_notified, total_assessed=total_assessed,
+            remeasure_total=remeasure_total)
         subject = f"National Stunting Overview {month:02d}/{year}"
 
         sender = EmailSender(log)
@@ -398,21 +427,8 @@ def _run_hospital_reports(
                 _push_error(jid, "Email enabled but SMTP connection failed — "
                                  "check EMAIL_USER/EMAIL_PASSWORD in .env.")
 
-        # At-risk (growth-velocity) children, computed once nationally and
-        # filtered per hospital below — attached alongside each hospital's
-        # usual report so facilities see who needs follow-up attention now,
-        # not just who's currently stunted. Only computed when actually
-        # emailing (it's an extra DB query + classification pass).
-        at_risk_national = None
-        if should_email:
-            try:
-                from core.risk_classifier import build_risk_df_for_period
-                at_risk_national = build_risk_df_for_period(loader.stunted_df)
-            except Exception as exc:
-                log.warning(f"At-risk computation unavailable: {exc}")
-                at_risk_national = pd.DataFrame()
-
         hospitals_notified = 0
+        remeasure_total = 0
 
         for idx, (name, df) in enumerate(groups.items()):
             _patch(jid, progress=idx,
@@ -462,28 +478,17 @@ def _run_hospital_reports(
                     except OSError:
                         pass
 
-                # At-risk (growth-velocity) children for THIS hospital — an
-                # additional attachment alongside the usual report/case list,
-                # not a replacement. Same national classification, just
-                # filtered. HIGH risk only (weight loss between visits, severe
-                # wasting, or MUAC<11.5cm) — MEDIUM alone would run into the
-                # thousands per hospital and stop being an actionable list.
-                attachments  = [pdf, excel]
-                at_risk_xlsx = None
-                at_risk_n    = 0
-                if at_risk_national is not None and not at_risk_national.empty \
-                        and "district_hospital" in at_risk_national.columns:
-                    hosp_at_risk = at_risk_national[
-                        (at_risk_national["district_hospital"] == name) &
-                        (at_risk_national["risk_level"] == "HIGH")
-                    ]
-                    at_risk_n = len(hosp_at_risk)
-                    if at_risk_n:
-                        at_risk_xlsx = str(reports_dir / f"{safe}_At_Risk.xlsx")
-                        if not rep_gen.create_at_risk_excel(hosp_at_risk, at_risk_xlsx):
-                            at_risk_xlsx = None
-                if at_risk_xlsx:
-                    attachments.append(at_risk_xlsx)
+                # Heights to re-measure in THIS hospital's catchment (copied or
+                # shrinking heights, left out of the figures until re-measured).
+                attachments = [pdf, excel]
+                remeasure_n = 0
+                if should_email:
+                    remeasure_xlsx, remeasure_n = _remeasure_file(
+                        {"role": "hospital", "hospital": name}, year, month,
+                        reports_dir / f"{safe}_Remeasure.xlsx", log)
+                    remeasure_total += remeasure_n
+                    if remeasure_xlsx:
+                        attachments.append(remeasure_xlsx)
 
                 result = dict(
                     hospital=name, status="generated",
@@ -508,7 +513,7 @@ def _run_hospital_reports(
                             view_link = None
                     body    = email_sender.create_hospital_email_body(
                         name, month, year, stats, sched_c, dashboard_link=view_link,
-                        at_risk_count=at_risk_n)
+                        remeasure_count=remeasure_n)
                     try:
                         email_sender.server.noop()
                     except Exception:
@@ -559,8 +564,8 @@ def _run_hospital_reports(
             _patch(jid, task="Sending national overview to senior officials…")
             _send_national_overview(jid, loader, month, year, dry_run,
                                     triggered_by, log, reports_dir,
-                                    at_risk_df=at_risk_national,
-                                    hospitals_notified=hospitals_notified)
+                                    hospitals_notified=hospitals_notified,
+                                    remeasure_total=remeasure_total)
 
         _patch(jid, status="completed", progress=len(hospitals),
                task="Done.", finished=datetime.now().isoformat())
@@ -695,6 +700,15 @@ def _run_facility_reports(
                     email_sent=False,
                 )
 
+                attachments = [pdf, excel]
+                remeasure_n = 0
+                if should_email:
+                    remeasure_xlsx, remeasure_n = _remeasure_file(
+                        {"role": "health_center", "health_center": name}, year, month,
+                        reports_dir / f"Fac_{safe}_Remeasure.xlsx", log)
+                    if remeasure_xlsx:
+                        attachments.append(remeasure_xlsx)
+
                 if should_email and connected and email_sender:
                     contact  = contacts.get(name) or contacts_norm.get(_norm_name(name))
                     real_to  = contact["facility_email"] if contact else None
@@ -719,6 +733,7 @@ def _run_facility_reports(
                         f"Total stunted children: {stats.get('total_stunted_children', 0):,}\n"
                         f"District: {district}  |  Hospital: {hospital}\n\n"
                         f"Please ensure follow-up per national protocols.\n\n"
+                        f"{_remeasure_note(remeasure_n)}"
                         f"{link}"
                         f"Best regards,\nRBC Stunting Surveillance\nTriggered by: {triggered_by}"
                     )
@@ -731,20 +746,20 @@ def _run_facility_reports(
                             to_email=app_config.TEST_EMAIL, cc_emails=[],
                             subject=f"[TEST] {subject}",
                             body=f"[TEST — real: {real_to or 'not configured'}]\n\n{body}",
-                            attachments=[pdf, excel])
+                            attachments=attachments)
                         result["dry_run"] = True
                         result["real_recipient"] = real_to or "(not configured)"
                     elif real_to:
                         result["email_sent"] = email_sender.send_email(
                             to_email=real_to, cc_emails=[],
                             subject=subject, body=body,
-                            attachments=[pdf, excel])
+                            attachments=attachments)
                     else:
                         result["email_error"] = "No contact in health_facility_emails.json"
 
                 # Don't keep sent reports on disk — they've been emailed.
                 if should_email:
-                    for _f in (pdf, excel):
+                    for _f in attachments:
                         try:
                             os.remove(_f)
                         except OSError:
