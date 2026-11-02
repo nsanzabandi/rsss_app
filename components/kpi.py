@@ -67,9 +67,11 @@ def metric_card(
     href: str | None = None,
     xl=3,
     delta: dict | None = None,
+    tip: str | None = None,
 ) -> dbc.Col:
     """Modern headline KPI card: soft icon chip + bold value + label.
-    href → the whole card is a link (with a hover lift and a 'View' hint)."""
+    href → the whole card is a link (with a hover lift and a 'View' hint).
+    tip  → plain-language explanation shown when the card is hovered."""
     card = (
         dbc.Card(
             dbc.CardBody(
@@ -106,6 +108,8 @@ def metric_card(
     if href:
         card = dcc.Link(card, href=href, className="text-decoration-none d-block h-100",
                         title="Open the at-risk dashboard for this selection")
+    if tip:
+        card = html.Div(card, title=tip, className="h-100")
     return dbc.Col(card, xs=6, md=4, xl=xl, className="mb-2")
 
 
