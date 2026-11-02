@@ -14,7 +14,8 @@ Method (WHO Child Growth Standards, height/length-for-age):
         −3 ≤ HAZ < −2 → Moderate stunting
         HAZ ≥ −2  → Normal
   • Only a height measured at that visit counts. Biologically implausible
-    heights and |HAZ| > 6 are treated as errors (not measured). A blank
+    heights and |HAZ| > 6 are treated as errors (not measured), and so are
+    copied or shrinking heights (core/fast_build.suspect_heights). A blank
     duplicate event on the same day takes that day's measured height; heights
     are never borrowed from the child's other visit days — an older height at
     an older age made the child look stunted. A visit with no usable height
@@ -39,6 +40,12 @@ _lms_cache: pd.DataFrame | None = None
 # is a data-entry error, not a real measurement.
 _HEIGHT_MIN, _HEIGHT_MAX = 38.0, 140.0
 _HAZ_FLAG = 6.0   # |HAZ| beyond this is biologically implausible (WHO flag)
+
+# Heights that can't be right next to the child's previous measured visit
+# (also used by core/fast_build.suspect_heights):
+COPY_MIN_DAYS = 28      # a baby can't keep the same length for 4 weeks …
+COPY_MAX_AGE  = 6.0     # … while under 6 months old (~2–4 cm a month)
+SHRINK_CM     = 2.0     # shorter than the previous visit by more than this
 
 _MALE_TOKENS   = {"1", "m", "male", "boy", "garcon", "garçon", "umuhungu", "gabo"}
 _FEMALE_TOKENS = {"2", "f", "female", "girl", "fille", "umukobwa", "gore"}
@@ -148,6 +155,23 @@ def add_computed_stunting(df: pd.DataFrame, impute: bool = True) -> pd.DataFrame
     # First-pass HAZ → implausible z is a data-entry error, not a measurement
     z0 = haz(out["_height"], out["_age_m"], out["_sex"])
     out.loc[np.abs(z0) > _HAZ_FLAG, "_height"] = np.nan
+
+    # Copied or shrinking heights count as not measured — the same rule as
+    # core/fast_build.suspect_heights.
+    if col["tei"] and col["date"]:
+        tei = col["tei"]
+        dday = pd.to_datetime(out[col["date"]], errors="coerce").dt.normalize()
+        m = out.assign(_day=dday)[out["_height"].notna() & dday.notna()]
+        days = (m.groupby([tei, "_day"]).agg(_hd=("_height", "mean"), _ad=("_age_m", "min"))
+                 .reset_index().sort_values([tei, "_day"]))
+        prev_h = days.groupby(tei)["_hd"].shift(1)
+        gap = (days["_day"] - days.groupby(tei)["_day"].shift(1)).dt.days
+        bad = (((days["_hd"] == prev_h) & (gap >= COPY_MIN_DAYS) & (days["_ad"] < COPY_MAX_AGE))
+               | (days["_hd"] < prev_h - SHRINK_CM))
+        bad_keys = set(zip(days.loc[bad, tei], days.loc[bad, "_day"]))
+        if bad_keys:
+            hit = pd.Series(list(zip(out[tei], dday)), index=out.index).isin(bad_keys)
+            out.loc[hit, "_height"] = np.nan
 
     # eTracker often holds two events for the same visit day — one with the
     # height, one without. The blank one is the same measurement, so it takes

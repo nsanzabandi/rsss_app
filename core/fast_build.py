@@ -59,9 +59,39 @@ def _with_haz(df: pl.DataFrame, hcol: str, out: str, lms: pl.DataFrame) -> pl.Da
     ).drop(["_L0", "_M0", "_S0", "_L1", "_M1", "_S1", "_a0", "_a1", "_af"])
 
 
+from core.stunting_calculator import COPY_MAX_AGE, COPY_MIN_DAYS, SHRINK_CM
+
+
+def suspect_heights(df: pl.DataFrame) -> pl.DataFrame:
+    """Measured heights that can't be right, compared with the child's previous
+    measured visit day (one height per day: that day's mean):
+      copied — the same height as a visit 4+ weeks earlier, under 6 months
+               (e.g. the birth length typed again at 6 weeks)
+      shrunk — more than 2 cm shorter than the previous visit
+    Input needs TEI, immunization_date, _h (plausible height or null) and
+    _age_m. Returns one row per flagged (TEI, _day) with the reason and the
+    earlier visit's height and date. These heights count as not measured."""
+    day = pl.col("immunization_date").cast(pl.Date)
+    days = (df.filter(pl.col("_h").is_not_null() & day.is_not_null())
+              .group_by([TEI, day.alias("_day")])
+              .agg(_hd=pl.col("_h").mean(), _ad=pl.col("_age_m").min())
+              .sort([TEI, "_day"])
+              .with_columns(prev_height=pl.col("_hd").shift(1).over(TEI),
+                            prev_date=pl.col("_day").shift(1).over(TEI)))
+    gap = (pl.col("_day") - pl.col("prev_date")).dt.total_days()
+    copied = ((pl.col("_hd") == pl.col("prev_height")) & (gap >= COPY_MIN_DAYS)
+              & (pl.col("_ad") < COPY_MAX_AGE))
+    shrunk = pl.col("_hd") < pl.col("prev_height") - SHRINK_CM
+    return (days.with_columns(reason=pl.when(copied).then(pl.lit("copied"))
+                                       .when(shrunk).then(pl.lit("shrunk")))
+                .filter(pl.col("reason").is_not_null())
+                .select(TEI, "_day", "reason", "prev_height", "prev_date"))
+
+
 def computed_stunting(df: pl.DataFrame) -> pl.DataFrame:
     """add_computed_stunting(): age (DOB + visit, else recorded), sex code,
-    plausible height, first-pass HAZ (|z|>6 → outlier), a blank same-day
+    plausible height, first-pass HAZ (|z|>6 → outlier), copied/shrinking
+    heights dropped (suspect_heights), a blank same-day
     duplicate takes that day's height, final haz_calc. Heights are never
     borrowed from other visit days."""
     lms = _lms()
@@ -76,6 +106,13 @@ def computed_stunting(df: pl.DataFrame) -> pl.DataFrame:
     df = df.with_columns(_hraw=pl.col("_h"))
     df = _with_haz(df, "_h", "_z0", lms)
     df = df.with_columns(_h=pl.when(pl.col("_z0").abs() > 6).then(None).otherwise(pl.col("_h")))
+    # Copied or shrinking heights (suspect_heights) count as not measured —
+    # they are listed for re-measuring, never replaced with a guess.
+    bad = suspect_heights(df).select(TEI, "_day", _bad=pl.lit(True))
+    df = (df.with_columns(_day=pl.col("immunization_date").cast(pl.Date))
+            .join(bad, on=[TEI, "_day"], how="left")
+            .with_columns(_h=pl.when(pl.col("_bad")).then(None).otherwise(pl.col("_h")))
+            .drop(["_day", "_bad"]))
     # A blank duplicate event on the same visit day takes that day's measured
     # height (see stunting_calculator.add_computed_stunting). Nothing is taken
     # from other days: carrying an older height forward to an older age made

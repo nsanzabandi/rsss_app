@@ -33,6 +33,7 @@ LISTS = {
     "at_risk":  "At-risk children",
     "missed":   "Missed appointments",
     "assessed": "All assessed children",
+    "remeasure": "Heights to re-measure",
 }
 
 _DIST = "COALESCE(h_district, residence_district, district_source)"
@@ -65,7 +66,9 @@ _COLUMNS = [
     ("date_of_birth", "Date of birth"), ("age_months", "Age (months)"),
     ("status", "Status"), ("risk_level", "Risk level"), ("risk_reason", "Why at risk"),
     ("days_overdue", "Days overdue"), ("next_visit_date", "Next visit due"),
-    ("visit_date", "Latest visit"), ("height_cm", "Height (cm)"), ("weight_kg", "Weight (kg)"),
+    ("visit_date", "Latest visit"), ("height_cm", "Height (cm)"),
+    ("height_issue", "Height problem"), ("prev_height_cm", "Earlier height (cm)"),
+    ("prev_visit_date", "Earlier visit"), ("weight_kg", "Weight (kg)"),
     ("muac_cm", "MUAC (cm)"), ("weight_velocity", "Weight change (kg/month)"),
     ("immunization_schedule", "Schedule"),
     ("province", "Province"), ("district", "District"), ("district_hospital", "Hospital"),
@@ -238,7 +241,74 @@ def _missed(user, province, district, hospital, start, end, **_) -> pd.DataFrame
     return df
 
 
-_BUILDERS = {"stunted": _stunted, "at_risk": _at_risk, "missed": _missed, "assessed": _assessed}
+def _remeasure(user, province, district, hospital, start, end, **_) -> pd.DataFrame:
+    """Children whose height at a visit in the period can't be right next to
+    their previous visit — copied (the same as 4+ weeks earlier, under 6
+    months) or more than 2 cm shorter (core/fast_build.suspect_heights). Those
+    heights are left out of the stunting figures until the child is measured
+    again; this list tells the facility whom to re-measure."""
+    import polars as pl
+    from config.db_local import get_local_conn
+    from core import fast_build as F
+    where, params = _sql_scope(user, province, district, hospital)
+    conds = [w for w in (where, "last_immunization_date >= %s" if start else "",
+                         "last_immunization_date <= %s" if end else "") if w]
+    params += [p for p in (start, end) if p]
+    conn = get_local_conn(); cur = conn.cursor()
+    cur.execute("SELECT DISTINCT entity_id FROM immunization_vaccination"
+                + (" WHERE " + " AND ".join(conds) if conds else ""), params)
+    ids = [r[0] for r in cur.fetchall()]
+    cur.close(); conn.close()
+    if not ids:
+        return pd.DataFrame()
+    # each child's full history: the previous visit may be before the period
+    m = F.load_measurements(ids)
+    if m is None:
+        return pd.DataFrame()
+    m = m.with_columns(
+        pl.col("height_at_visit_cm").cast(pl.Float64, strict=False),
+        pl.col("immunization_date").cast(pl.Utf8).str.to_date(strict=False),
+        pl.col("date_of_birth").cast(pl.Utf8).str.to_date(strict=False))
+    age = (pl.col("immunization_date") - pl.col("date_of_birth")).dt.total_days() / 30.4375
+    m = m.with_columns(
+        _h=pl.when(pl.col("height_at_visit_cm").is_between(38.0, 140.0))
+             .then(pl.col("height_at_visit_cm")),
+        _age_m=pl.when(age.is_between(0, 72)).then(age)
+                 .otherwise(pl.col("age_in_months").cast(pl.Float64, strict=False)))
+    bad = F.suspect_heights(m)
+    if start:
+        bad = bad.filter(pl.col("_day") >= pd.Timestamp(start).date())
+    if end:
+        bad = bad.filter(pl.col("_day") <= pd.Timestamp(end).date())
+    bad = bad.sort("_day").unique(subset=[F.TEI], keep="last")     # latest problem per child
+    _check_size(bad.height)
+    if bad.height == 0:
+        return pd.DataFrame()
+    b = bad.to_pandas().rename(columns={F.TEI: "tracked_entity_instance"})
+    conn = get_local_conn(); cur = conn.cursor()
+    _ensure_village_table(cur); conn.commit()
+    cur.execute(_DETAIL_SQL + " WHERE entity_id = ANY(%s)", [b["tracked_entity_instance"].tolist()])
+    cols = [c[0] for c in cur.description]
+    d = pd.DataFrame(cur.fetchall(), columns=cols)
+    cur.close(); conn.close()
+    # the visit with the problem (a measured event on that day)
+    d["_day"] = pd.to_datetime(d["visit_date"]).dt.normalize()
+    b["_day"], b["prev_date"] = pd.to_datetime(b["_day"]), pd.to_datetime(b["prev_date"])
+    d = d.merge(b, on=["tracked_entity_instance", "_day"], how="inner")
+    d = (d[d["height_cm"].notna()].sort_values(["visit_date", "event_id"])
+           .drop_duplicates("tracked_entity_instance", keep="last"))
+    d["prev_height_cm"] = d["prev_height"].astype(float).round(1)
+    d["prev_visit_date"] = d["prev_date"]
+    d["height_issue"] = d.apply(lambda r: (
+        f"Same as on {r['prev_date']:%d %b %Y} — copied? Re-measure" if r["reason"] == "copied"
+        else f"{float(r['prev_height']) - float(r['height_cm']):.1f} cm shorter than on "
+             f"{r['prev_date']:%d %b %Y} — re-measure"), axis=1)
+    return (d.drop(columns=["_day", "reason", "prev_height", "prev_date"])
+             .sort_values(["district", "district_hospital", "health_facility", "child_name"]))
+
+
+_BUILDERS = {"stunted": _stunted, "at_risk": _at_risk, "missed": _missed, "assessed": _assessed,
+             "remeasure": _remeasure}
 
 
 # ── File + audit ───────────────────────────────────────────────────────────────
@@ -324,6 +394,10 @@ def build_download(kind: str, user: dict, province=None, district=None, hospital
         ("Period", period if kind != "missed" else
          f"next visit due {MISSED_LOOKBACK}–{MISSED_DAYS} days ago"),
         ("Children", f"{len(df):,}"),
+    ] + ([("Why", "These heights can't be right next to the child's previous visit, so "
+                  "they are left out of the stunting figures. Please measure these "
+                  "children again (lying down if under 2 years) and record the new height.")]
+         if kind == "remeasure" else []) + [
         ("Generated", datetime.now().strftime("%d %b %Y %H:%M")),
         ("Generated by", f"{user.get('full_name') or user.get('username')} ({user.get('role')})"),
         ("Source", "RSSS — NHIC, Ministry of Health Rwanda (eTracker data; WHO height-for-age)"),

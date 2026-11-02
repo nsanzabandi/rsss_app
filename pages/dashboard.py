@@ -197,7 +197,8 @@ def _period_options(data_start: str) -> list[dict]:
 _DL_ITEMS = [("stunted", "bi-arrow-down-circle", "Stunted children"),
              ("at_risk", "bi-exclamation-triangle", "At-risk children"),
              ("missed", "bi-calendar-x", "Missed appointments"),
-             ("assessed", "bi-people", "All assessed children")]
+             ("assessed", "bi-people", "All assessed children"),
+             ("remeasure", "bi-rulers", "Heights to re-measure")]
 
 
 def _download_menu(user: dict):
