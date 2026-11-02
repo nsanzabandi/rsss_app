@@ -340,12 +340,14 @@ def _send_national_overview(
         try: os.remove(pdf_path)
         except OSError: pass
 
-        _push_result(jid, dict(
-            hospital=ROW_NAME, status="generated", total_cases=total,
-            email_sent=sent > 0,
-            reason=(f"[TEST] sent to {app_config.TEST_EMAIL}" if dry_run
-                    else f"{sent}/{len(contacts)} senior recipient(s) sent"),
-        ))
+        row = dict(hospital=ROW_NAME, status="generated", total_cases=total,
+                   email_sent=sent > 0)
+        if sent:
+            row["reason"] = (f"[TEST] sent to {app_config.TEST_EMAIL}" if dry_run
+                             else f"{sent}/{len(contacts)} senior recipient(s) sent")
+        else:   # say so — this row used to read "sent" even when nothing went out
+            row["email_error"] = f"Not sent — {sender.last_error or 'mail server unavailable'}"
+        _push_result(jid, row)
 
     except Exception as exc:
         _push_error(jid, f"National overview: {exc}\n{traceback.format_exc()}")
