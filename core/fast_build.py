@@ -59,14 +59,17 @@ def _with_haz(df: pl.DataFrame, hcol: str, out: str, lms: pl.DataFrame) -> pl.Da
     ).drop(["_L0", "_M0", "_S0", "_L1", "_M1", "_S1", "_a0", "_a1", "_af"])
 
 
-from core.stunting_calculator import COPY_MAX_AGE, COPY_MIN_DAYS, SHRINK_CM
+from core.stunting_calculator import (COPY_MAX_AGE, COPY_MIN_DAYS, COPY_MIN_DAYS_OLDER,
+                                      COPY_YOUNG_AGE, SHRINK_CM)
 
 
 def suspect_heights(df: pl.DataFrame) -> pl.DataFrame:
-    """Measured heights that can't be right, compared with the child's previous
-    measured visit day (one height per day: that day's mean):
-      copied — the same height as a visit 4+ weeks earlier, under 6 months
-               (e.g. the birth length typed again at 6 weeks)
+    """Measured heights that can't be right, compared with the child's earlier
+    measured visit days (one height per day: that day's mean):
+      copied — the same height as ANY earlier visit, 4+ weeks earlier for a
+               baby under 6 months (e.g. the birth length typed again at 6
+               weeks or at the third visit), 8+ weeks earlier from 6 to 24
+               months; earlier visit = the first one with that height
       shrunk — more than 2 cm shorter than the previous visit
     Input needs TEI, immunization_date, _h (plausible height or null) and
     _age_m. Returns one row per flagged (TEI, _day) with the reason and the
@@ -76,15 +79,22 @@ def suspect_heights(df: pl.DataFrame) -> pl.DataFrame:
               .group_by([TEI, day.alias("_day")])
               .agg(_hd=pl.col("_h").mean(), _ad=pl.col("_age_m").min())
               .sort([TEI, "_day"])
-              .with_columns(prev_height=pl.col("_hd").shift(1).over(TEI),
-                            prev_date=pl.col("_day").shift(1).over(TEI)))
-    gap = (pl.col("_day") - pl.col("prev_date")).dt.total_days()
-    copied = ((pl.col("_hd") == pl.col("prev_height")) & (gap >= COPY_MIN_DAYS)
-              & (pl.col("_ad") < COPY_MAX_AGE))
-    shrunk = pl.col("_hd") < pl.col("prev_height") - SHRINK_CM
+              .with_columns(_ph=pl.col("_hd").shift(1).over(TEI),
+                            _pd=pl.col("_day").shift(1).over(TEI),
+                            _first=pl.col("_day").min().over([TEI, "_hd"])))
+    since = (pl.col("_day") - pl.col("_first")).dt.total_days()
+    age = pl.col("_ad")
+    copied = (((age < COPY_YOUNG_AGE) & (since >= COPY_MIN_DAYS))
+              | ((age >= COPY_YOUNG_AGE) & (age < COPY_MAX_AGE) & (since >= COPY_MIN_DAYS_OLDER)))
+    shrunk = pl.col("_hd") < pl.col("_ph") - SHRINK_CM
     return (days.with_columns(reason=pl.when(copied).then(pl.lit("copied"))
                                        .when(shrunk).then(pl.lit("shrunk")))
                 .filter(pl.col("reason").is_not_null())
+                .with_columns(
+                    prev_height=pl.when(pl.col("reason") == "copied").then(pl.col("_hd"))
+                                  .otherwise(pl.col("_ph")),
+                    prev_date=pl.when(pl.col("reason") == "copied").then(pl.col("_first"))
+                                .otherwise(pl.col("_pd")))
                 .select(TEI, "_day", "reason", "prev_height", "prev_date"))
 
 

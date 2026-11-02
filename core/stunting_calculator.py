@@ -43,9 +43,12 @@ _HAZ_FLAG = 6.0   # |HAZ| beyond this is biologically implausible (WHO flag)
 
 # Heights that can't be right next to the child's previous measured visit
 # (also used by core/fast_build.suspect_heights):
-COPY_MIN_DAYS = 28      # a baby can't keep the same length for 4 weeks …
-COPY_MAX_AGE  = 6.0     # … while under 6 months old (~2–4 cm a month)
-SHRINK_CM     = 2.0     # shorter than the previous visit by more than this
+# The same height as ANY earlier visit, after at least this long, at this age:
+COPY_MIN_DAYS       = 28     # under 6 months: babies grow ~2–4 cm a month
+COPY_YOUNG_AGE      = 6.0
+COPY_MIN_DAYS_OLDER = 56     # 6–24 months: ~1 cm a month, so 2 months ≈ 2 cm
+COPY_MAX_AGE        = 24.0   # older children grow too slowly to judge
+SHRINK_CM           = 2.0    # shorter than the previous visit by more than this
 
 _MALE_TOKENS   = {"1", "m", "male", "boy", "garcon", "garçon", "umuhungu", "gabo"}
 _FEMALE_TOKENS = {"2", "f", "female", "girl", "fille", "umukobwa", "gore"}
@@ -165,9 +168,12 @@ def add_computed_stunting(df: pd.DataFrame, impute: bool = True) -> pd.DataFrame
         days = (m.groupby([tei, "_day"]).agg(_hd=("_height", "mean"), _ad=("_age_m", "min"))
                  .reset_index().sort_values([tei, "_day"]))
         prev_h = days.groupby(tei)["_hd"].shift(1)
-        gap = (days["_day"] - days.groupby(tei)["_day"].shift(1)).dt.days
-        bad = (((days["_hd"] == prev_h) & (gap >= COPY_MIN_DAYS) & (days["_ad"] < COPY_MAX_AGE))
-               | (days["_hd"] < prev_h - SHRINK_CM))
+        first = days.groupby([tei, "_hd"])["_day"].transform("min")
+        since = (days["_day"] - first).dt.days         # since that height was first seen
+        copied = (((days["_ad"] < COPY_YOUNG_AGE) & (since >= COPY_MIN_DAYS))
+                  | ((days["_ad"] >= COPY_YOUNG_AGE) & (days["_ad"] < COPY_MAX_AGE)
+                     & (since >= COPY_MIN_DAYS_OLDER)))
+        bad = copied | (days["_hd"] < prev_h - SHRINK_CM)
         bad_keys = set(zip(days.loc[bad, tei], days.loc[bad, "_day"]))
         if bad_keys:
             hit = pd.Series(list(zip(out[tei], dday)), index=out.index).isin(bad_keys)
