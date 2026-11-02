@@ -73,6 +73,7 @@ def remeasure_lines(n: int) -> list[str]:
 
 class EmailSender:
     def __init__(self, log: "ReportLogger | None" = None):
+        self.last_error = ""   # why the last connect/send failed, for job results
         # log is optional: callers like the /test-email route and the risk page
         # construct EmailSender() with no arguments. Fall back to a default logger
         # so those paths don't crash with a missing-argument TypeError.
@@ -93,20 +94,32 @@ class EmailSender:
             )
             self.server = None
             return False
-        try:
-            self.server = smtplib.SMTP(cfg.SMTP_HOST, cfg.SMTP_PORT,
-                                       timeout=cfg.TIMEOUT)
-            self.server.ehlo()
-            if cfg.USE_TLS:
-                self.server.starttls()
+        # The mail server sometimes refuses or stalls one connection and accepts
+        # the next a few seconds later — so try three times before giving up.
+        for attempt in range(1, 4):
+            try:
+                self.server = smtplib.SMTP(cfg.SMTP_HOST, cfg.SMTP_PORT,
+                                           timeout=cfg.TIMEOUT)
                 self.server.ehlo()
-            self.server.login(cfg.SMTP_USER, cfg.SMTP_PASSWORD)
-            self.log.info(f"SMTP connected to {cfg.SMTP_HOST}:{cfg.SMTP_PORT}")
-            return True
-        except Exception as exc:
-            self.log.error(f"SMTP connect failed: {exc}")
-            self.server = None
-            return False
+                if cfg.USE_TLS:
+                    self.server.starttls()
+                    self.server.ehlo()
+                self.server.login(cfg.SMTP_USER, cfg.SMTP_PASSWORD)
+                self.log.info(f"SMTP connected to {cfg.SMTP_HOST}:{cfg.SMTP_PORT}")
+                self.last_error = ""
+                return True
+            except Exception as exc:
+                self.last_error = f"{type(exc).__name__}: {exc}"
+                self.log.error(f"SMTP connect failed (attempt {attempt}/3): {self.last_error}")
+                try:
+                    if self.server:
+                        self.server.close()
+                except Exception:
+                    pass
+                self.server = None
+                if attempt < 3:
+                    time.sleep(5 * attempt)
+        return False
 
     def disconnect(self) -> None:
         if self.server:
@@ -167,6 +180,7 @@ class EmailSender:
                 return self.send_email(to_email, cc_emails, subject, body, attachments)
             return False
         except Exception as exc:
+            self.last_error = f"{type(exc).__name__}: {exc}"
             self.log.error(f"Send error: {exc}")
             return False
 

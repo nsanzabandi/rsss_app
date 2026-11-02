@@ -424,8 +424,8 @@ def _run_hospital_reports(
             email_sender = EmailSender(log)
             connected    = email_sender.connect()
             if not connected:
-                _push_error(jid, "Email enabled but SMTP connection failed — "
-                                 "check EMAIL_USER/EMAIL_PASSWORD in .env.")
+                _push_error(jid, "Could not connect to the mail server at the start "
+                                 f"({email_sender.last_error}) — trying again for each email.")
 
         hospitals_notified = 0
         remeasure_total = 0
@@ -497,7 +497,7 @@ def _run_hospital_reports(
                     email_sent=False,
                 )
 
-                if should_email and connected and email_sender:
+                if should_email and email_sender:
                     contact = contacts.get(name) or contacts_norm.get(_norm_name(name))
                     subject = f"Hospital Stunting Report {month:02d}/{year} — {name}"
                     # Dashboard link is disabled for now (config.app_config.
@@ -540,6 +540,10 @@ def _run_hospital_reports(
                     else:
                         result["email_error"] = f"No contact matched for '{name}'"
 
+                if should_email and email_sender and not result.get("email_sent") \
+                        and not result.get("email_error"):
+                    result["email_error"] = email_sender.last_error or "Email not sent"
+
                 # Don't keep sent reports on disk — they've been emailed.
                 if should_email:
                     for _f in attachments:
@@ -554,7 +558,7 @@ def _run_hospital_reports(
                 _push_error(jid, f"{name}: {exc}\n{traceback.format_exc()}")
                 _push_result(jid, dict(hospital=name, status="failed", error=str(exc)))
 
-        if email_sender and connected:
+        if email_sender:
             try:
                 email_sender.disconnect()
             except Exception:
@@ -646,8 +650,8 @@ def _run_facility_reports(
             email_sender = EmailSender(log)
             connected    = email_sender.connect()
             if not connected:
-                _push_error(jid, "Email enabled but SMTP connection failed — "
-                                 "check EMAIL_USER/EMAIL_PASSWORD in .env.")
+                _push_error(jid, "Could not connect to the mail server at the start "
+                                 f"({email_sender.last_error}) — trying again for each email.")
 
         for idx, (name, df) in enumerate(groups.items()):
             _patch(jid, progress=idx,
@@ -709,7 +713,7 @@ def _run_facility_reports(
                     if remeasure_xlsx:
                         attachments.append(remeasure_xlsx)
 
-                if should_email and connected and email_sender:
+                if should_email and email_sender:
                     contact  = contacts.get(name) or contacts_norm.get(_norm_name(name))
                     real_to  = contact["facility_email"] if contact else None
                     cname    = (contact.get("contact_name") or f"{name} Team") if contact else f"{name} Team"
@@ -757,6 +761,10 @@ def _run_facility_reports(
                     else:
                         result["email_error"] = "No contact in health_facility_emails.json"
 
+                if should_email and email_sender and not result.get("email_sent") \
+                        and not result.get("email_error"):
+                    result["email_error"] = email_sender.last_error or "Email not sent"
+
                 # Don't keep sent reports on disk — they've been emailed.
                 if should_email:
                     for _f in attachments:
@@ -771,7 +779,7 @@ def _run_facility_reports(
                 _push_error(jid, f"{name}: {exc}\n{traceback.format_exc()}")
                 _push_result(jid, dict(facility=name, status="failed", error=str(exc)))
 
-        if email_sender and connected:
+        if email_sender:
             try:
                 email_sender.disconnect()
             except Exception:
