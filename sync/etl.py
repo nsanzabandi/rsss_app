@@ -605,6 +605,7 @@ def _fetch_district(
             _log(f"  {district_name} [{chunk_start}] — resuming from page {page} "
                  f"(page {last_page} already fetched)")
         chunk_ok = False   # only mark the chunk done on a clean finish, not an HTTP error
+        chunk_rows = 0
         while True:
             try:
                 resp = session.get(
@@ -637,6 +638,7 @@ def _fetch_district(
                 df = pd.DataFrame(rows, columns=headers)
                 _upsert_rows(df, district_name)
                 total_fetched += len(rows)
+                chunk_rows += len(rows)
 
                 if progress_cb:
                     progress_cb(district_name, total_fetched)
@@ -668,7 +670,13 @@ def _fetch_district(
         # Record this chunk as done only on a clean finish — an HTTP-error break
         # leaves it as "in progress at page N" (already saved above), so a
         # resumed run continues from page N+1 rather than the whole chunk.
-        if chunk_ok:
+        # An empty answer is not recorded as done either: eTracker returns no
+        # rows while its analytics tables are being rebuilt, and a chunk marked
+        # done then was skipped by every later run (October 2026 stayed empty).
+        if chunk_ok and chunk_rows == 0 and resume_key is not None:
+            _log(f"  {district_name} [{chunk_start}] — eTracker returned no events; "
+                 f"not marked done, the next run checks again")
+        elif chunk_ok:
             _save_chunk_progress(resume_key, district_name, chunk_start, chunk_end,
                                  last_page=page, done=True)
         else:
