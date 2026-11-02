@@ -130,10 +130,10 @@ def layout(user: dict) -> html.Div:
         html.Div([
             html.I(className="bi bi-info-circle me-1"),
             html.B("Reading the cards: "),
-            "the Stunting Rate (red ▲ worse / green ▼ better) and the red line in the "
-            "trend chart tell you whether stunting is going up or down. Total Stunted "
-            "is a number of children (grey change badge, grey bars in the chart): it "
-            "rises and falls with how many children were measured that month.",
+            "Total Stunted is a number of children; the Stunting Rate is the share of "
+            "measured children who are stunted, and the trend chart shows that rate. "
+            "When fewer children are measured, the number can fall while the rate rises — "
+            "use the rate to judge progress.",
         ], className="text-muted mb-3 px-1", style={"fontSize": "0.78rem"}),
         dcc.Interval(id="db-kpi-poll", interval=2500, n_intervals=0),
 
@@ -291,12 +291,6 @@ def _change(cur, prev, vs: str, points: bool = False, cur_label: str | None = No
     return {"text": text, "dir": direction, "detail": detail}
 
 
-def _neutral(d: dict | None) -> dict | None:
-    """Grey change badge for a count: the number of stunted children follows
-    how many were measured, so only the Stunting Rate gets a red/green verdict."""
-    return {**d, "neutral": True} if d else d
-
-
 def _period_label(start, end) -> str:
     a, b = pd.Timestamp(start), pd.Timestamp(end)
     if a.day == 1 and a.to_period("M") == b.to_period("M") and not _month_aligned(a, b):
@@ -341,19 +335,19 @@ def _national_cards(res: dict, risk: dict | None = None, href: str | None = None
                     (f"of {res['assessed']:,} children measured · latest visit"
                      if res.get("assessed") else "current (latest visit)"),
                     C_PRIMARY, "bi-arrow-down-circle-fill", xl=True,
-                    delta=waiting or _neutral(prev and _change(cur["current_total"], prev["current_total"], vs, cur_label=cur_label)),
+                    delta=waiting or (prev and _change(cur["current_total"], prev["current_total"], vs, cur_label=cur_label)),
                     tip="Number of children who were stunted at their latest measured visit. "
                         "It goes up or down with how many children were measured, so compare "
                         "the Stunting Rate to see whether stunting is improving."),
         metric_card("Ever Stunted", f(res["ever_stunted"]),
                     "stunted at any visit", C_WARNING, "bi-clock-history", xl=True,
-                    delta=waiting or _neutral(prev and _change(cur["ever_stunted"], prev["ever_stunted"], vs, cur_label=cur_label))),
+                    delta=waiting or (prev and _change(cur["ever_stunted"], prev["ever_stunted"], vs, cur_label=cur_label))),
         metric_card("Stunting Rate", f"{res['stunting_pct']}%",
                     "stunted ÷ children measured" + (f" · latest month {latest_month}" if latest_month else ""),
                     C_DANGER, "bi-graph-down-arrow", xl=True,
                     delta=prev and _change(cur["stunting_pct"], prev["stunting_pct"], vs, points=True, cur_label=cur_label),
                     tip="Share of measured children who are stunted (Total Stunted ÷ children "
-                        "measured). This is the red line in the 'Stunting Rate Over Time' chart, and "
+                        "measured). This is the line in the 'Stunting Rate Over Time' chart, and "
                         "the fair way to compare months or areas."),
         metric_card("High-Risk Children",
                     f(risk["high"]) if risk else "—",
@@ -715,39 +709,20 @@ def _overview(df: pd.DataFrame, child=None, monthly=None, schedule=None,
     if have_month:
         m = _month_rate(monthly, ctx_start, end, "rate")
         if not m.empty:
-            # Light bars = number stunted (same as the Total Stunted card), the
-            # red line = the rate (same as the Stunting Rate card) — the line is
-            # the one to read. The bars sit on the base y axis (right) and the
-            # rate on an overlaying axis (left), because Plotly draws an
-            # overlaying axis's traces on top.
-            fig_rate = go.Figure([
-                go.Bar(x=m["month"], y=m["stunted"], name="Number stunted",
-                       customdata=m["measured"], yaxis="y",
-                       marker_color="rgba(93,109,126,0.22)",
-                       hovertemplate="%{x|%b %Y}<br>%{y:,} stunted of %{customdata:,} "
-                                     "measured<extra></extra>"),
-                go.Scatter(x=m["month"], y=m["y"], text=m["y"], name="Stunting rate (%)",
-                           yaxis="y2", mode="lines+markers+text", fill="tozeroy",
-                           line=dict(color=_RED, width=2.5), fillcolor="rgba(192,57,43,0.10)",
-                           texttemplate="%{text:.1f}%", textposition="top center",
-                           textfont=dict(size=10, color="#7B241C"), cliponaxis=False,
-                           hovertemplate="%{x|%b %Y}<br>%{y:.1f}% stunted<extra></extra>"),
-            ])
-            fig_rate.update_layout(**_base(
-                height=_H, xaxis_title="", bargap=0.35,
-                title="Stunting Rate Over Time (%)<br><sup>red line: share of measured children "
-                      "who are stunted (read this one) · grey bars: number stunted</sup>",
-                legend=dict(orientation="h", y=-0.14, x=0.5, xanchor="center",
-                            font=dict(size=10)),
-                # bars stay in the lower part of the chart, under the line
-                yaxis=dict(side="right", showgrid=False, tickformat="~s",
-                           title=dict(text="Stunted children", font=dict(size=10)),
-                           range=[0, max(float(m["stunted"].max()) * 2.2, 1)]),
-                yaxis2=dict(overlaying="y", side="left", title="Stunting %",
-                            range=[0, max(float(m["y"].max()) * 1.28, 5)]),
-            ))
+            fig_rate = px.area(m, x="month", y="y", text="y",
+                               title="Stunting Rate Over Time (%)<br><sup>share of measured "
+                                     "children who are stunted · same as the Stunting Rate card</sup>",
+                               color_discrete_sequence=[_RED])
+            fig_rate.update_traces(
+                mode="lines+markers+text",
+                texttemplate="%{text:.1f}%", textposition="top center",
+                textfont=dict(size=10, color="#7B241C"), cliponaxis=False,
+                hovertemplate="%{x|%b %Y}<br>%{y:.1f}%<extra></extra>")
+            fig_rate.update_layout(**_base(height=_H, yaxis_title="Stunting %",
+                                           xaxis_title=""))
             # headroom + margins so the % labels (incl. the last month) aren't clipped
-            fig_rate.update_layout(margin=dict(l=48, r=56, t=68, b=40))   # two-line title
+            fig_rate.update_layout(margin=dict(l=48, r=40, t=68, b=40))   # two-line title
+            fig_rate.update_yaxes(range=[0, max(float(m["y"].max()) * 1.28, 5)])
             fig_rate.update_xaxes(automargin=True)
             if start and ctx_start != start:
                 fig_rate.add_vrect(

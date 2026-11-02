@@ -120,8 +120,6 @@ def delta_badge(d: dict) -> html.Div:
          "detail": "vs Apr–Jun 2026: 42,405"}"""
     arrow, cls = {"up": ("▲", "nhic-delta-up"), "down": ("▼", "nhic-delta-down")}.get(
         d.get("dir"), ("▬", "nhic-delta-flat"))
-    if d.get("neutral"):   # a count shown for information — no good/bad colour
-        cls = "nhic-delta-flat"
     if d.get("text") == "data still arriving":
         arrow = "⏳"
     return html.Div([html.Span([arrow, " ", d["text"]], className=f"nhic-delta {cls}"),
