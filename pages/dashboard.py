@@ -126,15 +126,7 @@ def layout(user: dict) -> html.Div:
         # KPI row (national headline — computed once, warmed in background)
         html.Div(id="db-kpi-caption", hidden=True),   # explanation now lives on the cards
         dbc.Row([kpi_placeholder() for _ in range(8)],
-                id="db-kpi-row", className="g-2 mb-1"),
-        html.Div([
-            html.I(className="bi bi-info-circle me-1"),
-            html.B("Reading the cards: "),
-            "Total Stunted is a number of children; the Stunting Rate is the share of "
-            "measured children who are stunted, and the trend chart shows that rate. "
-            "When fewer children are measured, the number can fall while the rate rises — "
-            "use the rate to judge progress.",
-        ], className="text-muted mb-3 px-1", style={"fontSize": "0.78rem"}),
+                id="db-kpi-row", className="g-2 mb-3"),
         dcc.Interval(id="db-kpi-poll", interval=2500, n_intervals=0),
 
         # Tabs
@@ -328,27 +320,16 @@ def _national_cards(res: dict, risk: dict | None = None, href: str | None = None
     return [
         metric_card("Total Vaccinated", f(res["total_vaccinated"]),
                     "unique children", C_INFO, "bi-people-fill", xl=True),
-        # The count and the rate can move in opposite directions (fewer children
-        # measured → fewer stunted, yet a higher share), so the card names its
-        # denominator and both cards explain themselves on hover.
         metric_card("Total Stunted", f(res["current_total"]),
-                    (f"of {res['assessed']:,} children measured · latest visit"
-                     if res.get("assessed") else "current (latest visit)"),
-                    C_PRIMARY, "bi-arrow-down-circle-fill", xl=True,
-                    delta=waiting or (prev and _change(cur["current_total"], prev["current_total"], vs, cur_label=cur_label)),
-                    tip="Number of children who were stunted at their latest measured visit. "
-                        "It goes up or down with how many children were measured, so compare "
-                        "the Stunting Rate to see whether stunting is improving."),
+                    "current (latest visit)", C_PRIMARY, "bi-arrow-down-circle-fill", xl=True,
+                    delta=waiting or (prev and _change(cur["current_total"], prev["current_total"], vs, cur_label=cur_label))),
         metric_card("Ever Stunted", f(res["ever_stunted"]),
                     "stunted at any visit", C_WARNING, "bi-clock-history", xl=True,
                     delta=waiting or (prev and _change(cur["ever_stunted"], prev["ever_stunted"], vs, cur_label=cur_label))),
         metric_card("Stunting Rate", f"{res['stunting_pct']}%",
-                    "stunted ÷ children measured" + (f" · latest month {latest_month}" if latest_month else ""),
+                    "of assessed children" + (f" · latest month {latest_month}" if latest_month else ""),
                     C_DANGER, "bi-graph-down-arrow", xl=True,
-                    delta=prev and _change(cur["stunting_pct"], prev["stunting_pct"], vs, points=True, cur_label=cur_label),
-                    tip="Share of measured children who are stunted (Total Stunted ÷ children "
-                        "measured). This is the line in the 'Stunting Rate Over Time' chart, and "
-                        "the fair way to compare months or areas."),
+                    delta=prev and _change(cur["stunting_pct"], prev["stunting_pct"], vs, points=True, cur_label=cur_label)),
         metric_card("High-Risk Children",
                     f(risk["high"]) if risk else "—",
                     (f"weight loss / severe wasting · {risk['at_risk']:,} at risk in total  ›  View"
@@ -710,8 +691,7 @@ def _overview(df: pd.DataFrame, child=None, monthly=None, schedule=None,
         m = _month_rate(monthly, ctx_start, end, "rate")
         if not m.empty:
             fig_rate = px.area(m, x="month", y="y", text="y",
-                               title="Stunting Rate Over Time (%)<br><sup>share of measured "
-                                     "children who are stunted · same as the Stunting Rate card</sup>",
+                               title="Stunting Rate Over Time(%)",
                                color_discrete_sequence=[_RED])
             fig_rate.update_traces(
                 mode="lines+markers+text",
@@ -721,7 +701,7 @@ def _overview(df: pd.DataFrame, child=None, monthly=None, schedule=None,
             fig_rate.update_layout(**_base(height=_H, yaxis_title="Stunting %",
                                            xaxis_title=""))
             # headroom + margins so the % labels (incl. the last month) aren't clipped
-            fig_rate.update_layout(margin=dict(l=48, r=40, t=68, b=40))   # two-line title
+            fig_rate.update_layout(margin=dict(l=48, r=40, t=48, b=40))
             fig_rate.update_yaxes(range=[0, max(float(m["y"].max()) * 1.28, 5)])
             fig_rate.update_xaxes(automargin=True)
             if start and ctx_start != start:
